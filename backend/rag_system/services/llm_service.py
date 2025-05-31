@@ -228,45 +228,78 @@ class LLMService:
                 f"Failed to generate response from {provider.value}. Detail: {str(e)}"
             ) from e
 
-async def check_provider_health(self, provider: LLMProvider) -> ComponentStatus:
-    """Check the health of a specific LLM provider."""
-    logger.info(f"Checking health for provider: {provider.value}")
-    
-    status = ComponentStatus(name=f"{provider.value.capitalize()} LLM", status=StatusEnum.UNKNOWN)
-    
-    try:
-        # Check if API key is configured
-        api_key = self.settings.get_api_key(provider.value)
-        key_is_set = api_key is not None and len(api_key.strip()) > 0
+    async def check_provider_health(self, provider: LLMProvider) -> ComponentStatus:
+        """Check the health of a specific LLM provider."""
+        logger.info(f"Checking health for provider: {provider.value}")
         
-        if not key_is_set:
-            status.status = StatusEnum.DEGRADED
-            status.message = f"API key not configured for {provider.value}"
-            status.details = {"configured": False, "reason": "missing_api_key"}
-            return status
-        
-        # Try to get the client and check health
-        client = self._get_client(provider)
-        is_healthy, message, details = await client.check_health()
-        
-        if is_healthy:
-            status.status = StatusEnum.OK
-            status.message = message
-            status.details = details or {"configured": True, "connection": "success"}
-        else:
-            status.status = StatusEnum.ERROR
-            status.message = message
-            status.details = details or {"configured": True, "connection": "failed"}
+        status = ComponentStatus(name=f"{provider.value.capitalize()} LLM", status=StatusEnum.UNKNOWN)
+        api_key = None
+        api_key_name = ""
+
+        try:
+            # Check if API key is configured
+            if provider == LLMProvider.OPENAI:
+                api_key = self.settings.OPENAI_API_KEY
+                api_key_name = "OPENAI_API_KEY"
+            elif provider == LLMProvider.ANTHROPIC:
+                api_key = self.settings.ANTHROPIC_API_KEY
+                api_key_name = "ANTHROPIC_API_KEY"
+            elif provider == LLMProvider.GEMINI:
+                api_key = self.settings.GOOGLE_API_KEY
+                api_key_name = "GOOGLE_API_KEY"
+            # Add local provider check here in the future if it uses API keys
+            # elif provider == LLMProvider.LOCAL:
+            #     # For local, health might mean the endpoint is reachable
+            #     # This part needs to be defined based on how local LLM health is determined
+            #     pass
+
+            if provider != LLMProvider.LOCAL and (api_key is None or len(api_key.strip()) == 0):
+                status.status = StatusEnum.DEGRADED
+                status.message = f"API key not configured for {provider.value} (checked {api_key_name})"
+                status.details = {"configured": False, "reason": "missing_api_key"}
+                logger.warning(status.message)
+                return status
             
-    except Exception as e:
-        logger.error(f"Health check failed for {provider.value}: {str(e)}")
-        status.status = StatusEnum.ERROR
-        status.message = f"Health check failed: {str(e)}"
-        status.details = {"error": str(e), "configured": True}
+            # Try to get the client and check health
+            # For local provider, this might involve a different health check logic
+            if provider == LLMProvider.LOCAL:
+                # TODO: Implement health check for local LLM
+                # For now, assume local is healthy if configured, or specific check needed
+                # depending on local LLM client implementation
+                status.status = StatusEnum.OK # Or UNKNOWN if no check implemented
+                status.message = "Local LLM health check not fully implemented yet."
+                status.details = {"configured": True, "info": "placeholder_status"}
+                logger.info(f"Local LLM ({provider.value}) health check placeholder.")
+                return status
+
+            client = self._get_client(provider) # This will raise ConfigurationError if not properly set up
+            is_healthy, message, details = await client.check_health()
+
+            if is_healthy:
+                status.status = StatusEnum.OK
+                status.message = message
+                status.details = details or {"configured": True, "connection": "success"}
+            else:
+                status.status = StatusEnum.ERROR
+                status.message = message
+                status.details = details or {"configured": True, "connection": "failed"}
+
+        except ConfigurationError as ce:
+            logger.warning(f"Configuration error during health check for {provider.value}: {str(ce)}")
+            status.status = StatusEnum.NOT_CONFIGURED # Or DEGRADED
+            status.message = f"Provider {provider.value} not configured: {str(ce)}"
+            status.details = {"configured": False, "reason": str(ce)}
+        except Exception as e:
+            logger.error(f"Health check failed for {provider.value}: {str(e)}", exc_info=True)
+            status.status = StatusEnum.ERROR
+            status.message = f"Health check failed: {str(e)}"
+            # Ensure details includes that it was configured if we passed the API key check stage
+            status.details = status.details or {} # Initialize if None
+            status.details.update({"error": str(e)})
+            if api_key_name: # If we determined an api_key_name, it means we expected it to be configured
+                 status.details["configured"] = True
     
-    return status
-
-
+        return status
 
 # Example Usage (typically not run directly like this in production)
 if __name__ == "__main__":
