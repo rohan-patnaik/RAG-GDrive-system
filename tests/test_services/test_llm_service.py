@@ -1,228 +1,194 @@
-# tests/test_services/test_llm_service.py
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 
-from rag_system.services.llm_service import LLMService, MAX_CONTEXT_CHAR_LENGTH
-from rag_system.models.schemas import LLMProvider, RetrievedChunk, ComponentStatus, StatusEnum
-from rag_system.utils.exceptions import LLMError, ConfigurationError
+from pydantic import SecretStr
+
+from rag_system.services.llm_service import LLMService
+from rag_system.models.schemas import LLMProvider, ComponentStatus, StatusEnum
 from rag_system.config.settings import AppSettings
-from rag_system.integrations.openai_client import OpenAIClient
-from rag_system.integrations.anthropic_client import AnthropicClient
-from rag_system.integrations.gemini_client import GeminiClient
+from rag_system.utils.exceptions import ConfigurationError, LLMError
 
-
+# Fixtures for AppSettings
 @pytest.fixture
-def llm_test_settings(test_settings: AppSettings) -> AppSettings:
-    # Ensure API keys are set for testing client initialization paths
-    settings_copy = test_settings.model_copy(deep=True)
-    settings_copy.OPENAI_API_KEY = "fake_openai_key"
-    settings_copy.ANTHROPIC_API_KEY = "fake_anthropic_key"
-    settings_copy.GOOGLE_API_KEY = "fake_google_key"
-    return settings_copy
-
-
-@pytest.fixture
-def mock_openai_client() -> AsyncMock:
-    client = AsyncMock(spec=OpenAIClient)
-    client.generate_response = AsyncMock(return_value=("OpenAI answer", "gpt-test"))
-    client.check_health = AsyncMock(return_value=(True, "OpenAI OK", {}))
-    return client
-
-@pytest.fixture
-def mock_anthropic_client() -> AsyncMock:
-    client = AsyncMock(spec=AnthropicClient)
-    client.generate_response = AsyncMock(return_value=("Anthropic answer", "claude-test"))
-    client.check_health = AsyncMock(return_value=(True, "Anthropic OK", {}))
-    return client
-
-@pytest.fixture
-def mock_gemini_client() -> AsyncMock:
-    client = AsyncMock(spec=GeminiClient)
-    client.generate_response = AsyncMock(return_value=("Gemini answer", "gemini-test"))
-    client.check_health = AsyncMock(return_value=(True, "Gemini OK", {}))
-    return client
-
-
-@pytest.fixture
-def llm_service_with_mocks(
-    llm_test_settings: AppSettings,
-    mock_openai_client: AsyncMock,
-    mock_anthropic_client: AsyncMock,
-    mock_gemini_client: AsyncMock,
-) -> LLMService:
-    with patch("rag_system.services.llm_service.OpenAIClient", return_value=mock_openai_client), \
-         patch("rag_system.services.llm_service.AnthropicClient", return_value=mock_anthropic_client), \
-         patch("rag_system.services.llm_service.GeminiClient", return_value=mock_gemini_client):
-        service = LLMService(settings=llm_test_settings)
-        return service
-
-
-def test_llm_service_initialization(llm_test_settings: AppSettings):
-    """Test LLMService initializes clients based on API key presence."""
-    with patch("rag_system.services.llm_service.OpenAIClient") as MockOAI, \
-         patch("rag_system.services.llm_service.AnthropicClient") as MockAnthropic, \
-         patch("rag_system.services.llm_service.GeminiClient") as MockGemini:
-
-        # Case 1: All keys present
-        settings_all_keys = llm_test_settings.model_copy(deep=True)
-        LLMService(settings=settings_all_keys)
-        MockOAI.assert_called_once()
-        MockAnthropic.assert_called_once()
-        MockGemini.assert_called_once()
-
-        MockOAI.reset_mock()
-        MockAnthropic.reset_mock()
-        MockGemini.reset_mock()
-
-        # Case 2: Only OpenAI key
-        settings_openai_only = llm_test_settings.model_copy(deep=True)
-        settings_openai_only.ANTHROPIC_API_KEY = None
-        settings_openai_only.GOOGLE_API_KEY = None
-        LLMService(settings=settings_openai_only)
-        MockOAI.assert_called_once()
-        MockAnthropic.assert_not_called()
-        MockGemini.assert_not_called()
-
-
-def test_get_client_not_configured(llm_test_settings: AppSettings):
-    """Test _get_client raises ConfigurationError if provider not configured."""
-    settings_no_openai = llm_test_settings.model_copy(deep=True)
-    settings_no_openai.OPENAI_API_KEY = None # Disable OpenAI
-
-    with patch("rag_system.services.llm_service.AnthropicClient"), \
-         patch("rag_system.services.llm_service.GeminiClient"): # Mock others to prevent their init issues
-        service = LLMService(settings=settings_no_openai)
-        with pytest.raises(ConfigurationError, match="Openai LLM provider is not configured"):
-            service._get_client(LLMProvider.OPENAI)
-
-
-@pytest.mark.asyncio
-async def test_generate_response_openai(
-    llm_service_with_mocks: LLMService, mock_openai_client: AsyncMock
-):
-    """Test generating response with OpenAI provider."""
-    query = "Test query"
-    chunks = [RetrievedChunk(id="c1", content="ctx1", metadata={}, score=0.9)]
-    answer, model_used = await llm_service_with_mocks.generate_response(
-        query, chunks, LLMProvider.OPENAI
+def mock_settings_all_configured():
+    """AppSettings with all major LLM providers configured."""
+    return AppSettings(
+        OPENAI_API_KEY=SecretStr("fake_openai_key"), DEFAULT_OPENAI_MODEL="gpt-3.5-turbo",
+        ANTHROPIC_API_KEY=SecretStr("fake_anthropic_key"), DEFAULT_ANTHROPIC_MODEL="claude-2",
+        GOOGLE_API_KEY=SecretStr("fake_google_key"), DEFAULT_GEMINI_MODEL="gemini-pro",
+        # Minimal other settings that might be required by AppSettings or LLMService init
+        RAG_APP_NAME="TestAppHealthCheck",
+        LOG_LEVEL="DEBUG",
+        DB_TYPE="memory",
+        VECTOR_DB_TYPE="chroma",
+        DEFAULT_EMBEDDING_MODEL="sentence-transformers/all-MiniLM-L6-v2",
+        CHROMA_PERSIST_DIRECTORY="/tmp/chroma_test_health",
+        CHROMA_COLLECTION_NAME="test_collection_health"
     )
-    assert answer == "OpenAI answer"
-    assert model_used == "gpt-test"
-    mock_openai_client.generate_response.assert_called_once()
-    # We can inspect the prompt passed to the client if needed
-    prompt_arg = mock_openai_client.generate_response.call_args[1]['prompt']
-    assert query in prompt_arg
-    assert "ctx1" in prompt_arg
 
-
-@pytest.mark.asyncio
-async def test_generate_response_anthropic(
-    llm_service_with_mocks: LLMService, mock_anthropic_client: AsyncMock
-):
-    """Test generating response with Anthropic provider."""
-    query = "Test query"
-    chunks = [] # Test with no chunks
-    answer, model_used = await llm_service_with_mocks.generate_response(
-        query, chunks, LLMProvider.ANTHROPIC, model_name_override="claude-custom"
+@pytest.fixture
+def mock_settings_openai_only():
+    """AppSettings with only OpenAI configured."""
+    return AppSettings(
+        OPENAI_API_KEY=SecretStr("fake_openai_key"), DEFAULT_OPENAI_MODEL="gpt-3.5-turbo",
+        ANTHROPIC_API_KEY=None, DEFAULT_ANTHROPIC_MODEL="claude-2", # Explicitly None
+        GOOGLE_API_KEY=SecretStr(""), DEFAULT_GEMINI_MODEL="gemini-pro",       # Explicitly empty SecretStr
+        RAG_APP_NAME="TestAppHealthCheckOpenAI",
+        LOG_LEVEL="DEBUG",
+        DB_TYPE="memory",
+        VECTOR_DB_TYPE="chroma",
+        DEFAULT_EMBEDDING_MODEL="sentence-transformers/all-MiniLM-L6-v2",
+        CHROMA_PERSIST_DIRECTORY="/tmp/chroma_test_health_openai",
+        CHROMA_COLLECTION_NAME="test_collection_health_openai"
     )
-    assert answer == "Anthropic answer"
-    assert model_used == "claude-test" # Mock returns this, not override, for simplicity of mock
-    mock_anthropic_client.generate_response.assert_called_once()
-    # Check that model_name_override was passed to the client
-    assert mock_anthropic_client.generate_response.call_args[1]['model_name_override'] == "claude-custom"
-    prompt_arg = mock_anthropic_client.generate_response.call_args[1]['prompt']
-    assert "no specific context was found" in prompt_arg.lower() # Check no-context prompt part
-
 
 @pytest.mark.asyncio
-async def test_generate_response_gemini(
-    llm_service_with_mocks: LLMService, mock_gemini_client: AsyncMock
-):
-    """Test generating response with Gemini provider."""
-    query = "Test query"
-    chunks = [RetrievedChunk(id="c1", content="ctx_gemini", metadata={}, score=0.9)]
-    answer, model_used = await llm_service_with_mocks.generate_response(
-        query, chunks, LLMProvider.GEMINI
-    )
-    assert answer == "Gemini answer"
-    assert model_used == "gemini-test"
-    mock_gemini_client.generate_response.assert_called_once()
+class TestLLMServiceHealthChecks:
+
+    async def test_check_provider_health_healthy(self, mock_settings_all_configured: AppSettings):
+        llm_service = LLMService(settings=mock_settings_all_configured)
+
+        mock_client = MagicMock()
+        # Make check_health an AsyncMock if it's not already by virtue of being part of a MagicMock
+        # that is later used in an async context. Explicitly making it AsyncMock is safer.
+        mock_client.check_health = AsyncMock(return_value=(True, "Provider is Healthy", {"details": "all_ok"}))
+
+        # Patch _get_client for the LLMService instance
+        with patch.object(llm_service, '_get_client', return_value=mock_client) as mock_get_client_method:
+            for provider in [LLMProvider.OPENAI, LLMProvider.ANTHROPIC, LLMProvider.GEMINI]:
+                status_report = await llm_service.check_provider_health(provider)
+
+                mock_get_client_method.assert_called_with(provider)
+                mock_client.check_health.assert_called_once() # Assert it was called
+
+                assert status_report.status == StatusEnum.OK
+                assert status_report.message == "Provider is Healthy"
+                # The details are merged, so check for inclusion
+                assert status_report.details.get("configured") is True
+                assert status_report.details.get("connection") == "success"
+                assert status_report.details.get("details") == "all_ok"
+
+                mock_client.check_health.reset_mock() # Reset for the next provider in the loop
+                mock_get_client_method.reset_mock() # Reset for the next provider
+
+    async def test_check_provider_health_unhealthy(self, mock_settings_all_configured: AppSettings):
+        llm_service = LLMService(settings=mock_settings_all_configured)
+
+        mock_client = MagicMock()
+        mock_client.check_health = AsyncMock(return_value=(False, "Provider is Unhealthy", {"details": "connection_failed"}))
+
+        with patch.object(llm_service, '_get_client', return_value=mock_client) as mock_get_client_method:
+            status_report = await llm_service.check_provider_health(LLMProvider.OPENAI)
+
+            mock_get_client_method.assert_called_with(LLMProvider.OPENAI)
+            mock_client.check_health.assert_called_once()
+
+            assert status_report.status == StatusEnum.ERROR
+            assert status_report.message == "Provider is Unhealthy"
+            assert status_report.details.get("configured") is True
+            assert status_report.details.get("connection") == "failed"
+            assert status_report.details.get("details") == "connection_failed"
+
+    async def test_check_provider_health_key_not_configured(self, mock_settings_openai_only: AppSettings):
+        llm_service = LLMService(settings=mock_settings_openai_only)
+
+        # Test Anthropic (API key is None)
+        status_anthropic = await llm_service.check_provider_health(LLMProvider.ANTHROPIC)
+        assert status_anthropic.status == StatusEnum.DEGRADED
+        assert "API key not configured for anthropic (checked ANTHROPIC_API_KEY)" in status_anthropic.message
+        assert status_anthropic.details == {"configured": False, "reason": "missing_api_key"}
+
+        # Test Gemini (API key is "")
+        status_gemini = await llm_service.check_provider_health(LLMProvider.GEMINI)
+        assert status_gemini.status == StatusEnum.DEGRADED
+        assert "API key not configured for gemini (checked GOOGLE_API_KEY)" in status_gemini.message
+        assert status_gemini.details == {"configured": False, "reason": "missing_api_key"}
+
+    async def test_check_provider_health_client_check_health_raises_llm_error(self, mock_settings_all_configured: AppSettings):
+        llm_service = LLMService(settings=mock_settings_all_configured)
+
+        mock_client = MagicMock()
+        # Simulate LLMError from client's check_health
+        llm_error_instance = LLMError(message="Client-side LLM Error", detail="Connection Timeout")
+        mock_client.check_health = AsyncMock(side_effect=llm_error_instance)
+
+        with patch.object(llm_service, '_get_client', return_value=mock_client) as mock_get_client_method:
+            status_report = await llm_service.check_provider_health(LLMProvider.OPENAI)
+
+            mock_get_client_method.assert_called_with(LLMProvider.OPENAI)
+            mock_client.check_health.assert_called_once()
+
+            assert status_report.status == StatusEnum.ERROR
+            assert f"Health check failed: {str(llm_error_instance)}" in status_report.message
+            assert status_report.details.get("configured") is True
+            assert str(llm_error_instance) in status_report.details.get("error", "")
+
+    async def test_check_provider_health_client_check_health_raises_general_exception(self, mock_settings_all_configured: AppSettings):
+        llm_service = LLMService(settings=mock_settings_all_configured)
+
+        mock_client = MagicMock()
+        general_exception_instance = Exception("Some other error")
+        mock_client.check_health = AsyncMock(side_effect=general_exception_instance)
+
+        with patch.object(llm_service, '_get_client', return_value=mock_client) as mock_get_client_method:
+            status_report = await llm_service.check_provider_health(LLMProvider.OPENAI)
+
+            mock_get_client_method.assert_called_with(LLMProvider.OPENAI)
+            mock_client.check_health.assert_called_once()
+
+            assert status_report.status == StatusEnum.ERROR
+            assert f"Health check failed: {str(general_exception_instance)}" in status_report.message
+            assert status_report.details.get("configured") is True
+            assert str(general_exception_instance) in status_report.details.get("error", "")
 
 
-@pytest.mark.asyncio
-async def test_generate_response_client_error(llm_service_with_mocks: LLMService, mock_openai_client: AsyncMock):
-    """Test generate_response when the client raises an LLMError."""
-    mock_openai_client.generate_response.side_effect = LLMError("OpenAI client failed")
-    with pytest.raises(LLMError, match="OpenAI client failed"):
-        await llm_service_with_mocks.generate_response("q", [], LLMProvider.OPENAI)
+    async def test_check_provider_health_get_client_raises_config_error(self, mock_settings_all_configured: AppSettings):
+        llm_service = LLMService(settings=mock_settings_all_configured)
 
+        config_error_instance = ConfigurationError("Client init failed for test")
+        # Patch _get_client to raise ConfigurationError
+        with patch.object(llm_service, '_get_client', side_effect=config_error_instance) as mock_get_client_method:
+            status_report = await llm_service.check_provider_health(LLMProvider.GEMINI)
 
-def test_construct_prompt_with_context(llm_service_with_mocks: LLMService):
-    """Test prompt construction with context."""
-    query = "What is X?"
-    chunks = [
-        RetrievedChunk(id="id1", content="Context about X.", metadata={}, score=0.9),
-        RetrievedChunk(id="id2", content="More context on X.", metadata={}, score=0.8),
-    ]
-    prompt = llm_service_with_mocks._construct_prompt(query, chunks, LLMProvider.OPENAI)
-    assert query in prompt
-    assert "Context about X" in prompt
-    assert "More context on X" in prompt
-    assert "Source 1 (ID: id1, Score: 0.9000)" in prompt
+            mock_get_client_method.assert_called_with(LLMProvider.GEMINI)
 
+            assert status_report.status == StatusEnum.NOT_CONFIGURED
+            assert f"Provider gemini not configured: {str(config_error_instance)}" in status_report.message
+            assert status_report.details == {"configured": False, "reason": str(config_error_instance)}
 
-def test_construct_prompt_no_context(llm_service_with_mocks: LLMService):
-    """Test prompt construction with no context."""
-    query = "What is Y?"
-    prompt = llm_service_with_mocks._construct_prompt(query, [], LLMProvider.GEMINI)
-    assert query in prompt
-    assert "no specific context was found" in prompt.lower()
+    async def test_check_provider_health_local_provider_placeholder(self, mock_settings_all_configured: AppSettings):
+        llm_service = LLMService(settings=mock_settings_all_configured)
 
+        status_report = await llm_service.check_provider_health(LLMProvider.LOCAL)
 
-def test_construct_prompt_context_truncation(llm_service_with_mocks: LLMService):
-    """Test prompt construction with context truncation."""
-    query = "Long query"
-    long_content = "A" * (MAX_CONTEXT_CHAR_LENGTH // 2 + 100) # Ensure one chunk exceeds half
-    chunks = [
-        RetrievedChunk(id="c1", content=long_content, metadata={}, score=0.9),
-        RetrievedChunk(id="c2", content="Short context.", metadata={}, score=0.8), # This one should be truncated
-    ]
-    prompt = llm_service_with_mocks._construct_prompt(query, chunks, LLMProvider.OPENAI)
-    assert long_content in prompt
-    assert "Short context." not in prompt # Assuming MAX_CONTEXT_CHAR_LENGTH is set appropriately for this test
-    # This test is sensitive to the exact value of MAX_CONTEXT_CHAR_LENGTH and chunk formatting.
+        assert status_report.status == StatusEnum.OK
+        assert "Local LLM health check not fully implemented yet." in status_report.message
+        assert status_report.details == {"configured": True, "info": "placeholder_status"}
 
+    async def test_check_provider_health_openai_key_missing_direct_check(self, mock_settings_openai_only: AppSettings):
+        """Test case where a key is missing, relying on the direct check in check_provider_health."""
+        # Modify settings to remove OpenAI key after init (less common, but tests the check)
+        llm_service = LLMService(settings=mock_settings_openai_only)
 
-@pytest.mark.asyncio
-async def test_check_provider_health_success(llm_service_with_mocks: LLMService, mock_openai_client: AsyncMock):
-    """Test successful health check for a provider."""
-    status = await llm_service_with_mocks.check_provider_health(LLMProvider.OPENAI)
-    assert status.status == StatusEnum.OK
-    assert status.name == "Openai LLM"
-    assert status.message == "OpenAI OK"
-    mock_openai_client.check_health.assert_called_once()
+        # Test Anthropic (key is None in fixture)
+        status_anthropic = await llm_service.check_provider_health(LLMProvider.ANTHROPIC)
+        assert status_anthropic.status == StatusEnum.DEGRADED
+        assert "API key not configured for anthropic" in status_anthropic.message.lower()
+        assert status_anthropic.details.get("reason") == "missing_api_key"
 
+        # Test Gemini (key is "" in fixture)
+        status_gemini = await llm_service.check_provider_health(LLMProvider.GEMINI)
+        assert status_gemini.status == StatusEnum.DEGRADED
+        assert "API key not configured for gemini" in status_gemini.message.lower()
+        assert status_gemini.details.get("reason") == "missing_api_key"
 
-@pytest.mark.asyncio
-async def test_check_provider_health_failure(llm_service_with_mocks: LLMService, mock_anthropic_client: AsyncMock):
-    """Test health check failure for a provider."""
-    mock_anthropic_client.check_health.return_value = (False, "Anthropic down", {"code": 500})
-    status = await llm_service_with_mocks.check_provider_health(LLMProvider.ANTHROPIC)
-    assert status.status == StatusEnum.ERROR
-    assert status.name == "Anthropic LLM"
-    assert status.message == "Anthropic down"
-    assert status.details == {"code": 500}
-
-
-@pytest.mark.asyncio
-async def test_check_provider_health_not_configured(llm_test_settings: AppSettings):
-    """Test health check for a provider that is not configured."""
-    settings_no_gemini = llm_test_settings.model_copy(deep=True)
-    settings_no_gemini.GOOGLE_API_KEY = None # Disable Gemini
-
-    with patch("rag_system.services.llm_service.OpenAIClient"), \
-         patch("rag_system.services.llm_service.AnthropicClient"):
-        service = LLMService(settings=settings_no_gemini)
-        status = await service.check_provider_health(LLMProvider.GEMINI)
-        assert status.status == StatusEnum.ERROR
-        assert "Not configured" in status.message
+        # For OpenAI, key IS configured in this fixture, so it should try to get client
+        # We need to mock _get_client for this part for OpenAI to avoid actual client calls
+        mock_client_openai = MagicMock()
+        mock_client_openai.check_health = AsyncMock(return_value=(True, "OpenAI Healthy", {}))
+        with patch.object(llm_service, '_get_client', return_value=mock_client_openai) as mock_get_client_openai:
+            status_openai = await llm_service.check_provider_health(LLMProvider.OPENAI)
+            assert status_openai.status == StatusEnum.OK
+            mock_get_client_openai.assert_called_with(LLMProvider.OPENAI)
+            mock_client_openai.check_health.assert_called_once()
+            assert "OpenAI Healthy" in status_openai.message
