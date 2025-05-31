@@ -1,0 +1,40 @@
+# Core API Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# Vector Store & Embeddings
+chromadb==0.4.17
+sentence-transformers==2.2.2
+numpy==1.24.3
+
+# LLM Clients
+openai==1.3.7
+anthropic==0.7.7
+google-generativeai==0.3.2
+
+# Text Processing
+langchain-text-splitters==0.0.1
+
+# CLI & Utilities
+click==8.1.7
+rich==13.7.0
+httpx==0.25.2
+
+# Production Dependencies
+tenacity==8.2.3
+structlog==23.2.0
+
+# Development Dependencies
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+black==23.11.0
+isort==5.12.0
+mypy==1.7.1
+
+# Streamlit (Optional)
+streamlit==1.28.0
