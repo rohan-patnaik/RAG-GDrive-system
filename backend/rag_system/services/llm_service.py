@@ -46,7 +46,7 @@ class LLMService:
         if self.settings.OPENAI_API_KEY:
             try:
                 self._clients[LLMProvider.OPENAI] = OpenAIClient(
-                    api_key=self.settings.OPENAI_API_KEY,
+                    api_key=self.settings.OPENAI_API_KEY.get_secret_value() if self.settings.OPENAI_API_KEY else None,
                     default_model=self.settings.DEFAULT_OPENAI_MODEL,
                 )
                 logger.info("OpenAI client initialized.")
@@ -59,7 +59,7 @@ class LLMService:
         if self.settings.ANTHROPIC_API_KEY:
             try:
                 self._clients[LLMProvider.ANTHROPIC] = AnthropicClient(
-                    api_key=self.settings.ANTHROPIC_API_KEY,
+                    api_key=self.settings.ANTHROPIC_API_KEY.get_secret_value() if self.settings.ANTHROPIC_API_KEY else None,
                     default_model=self.settings.DEFAULT_ANTHROPIC_MODEL,
                 )
                 logger.info("Anthropic client initialized.")
@@ -71,7 +71,7 @@ class LLMService:
         if self.settings.GOOGLE_API_KEY:
             try:
                 self._clients[LLMProvider.GEMINI] = GeminiClient(
-                    api_key=self.settings.GOOGLE_API_KEY,
+                    api_key=self.settings.GOOGLE_API_KEY.get_secret_value() if self.settings.GOOGLE_API_KEY else None,
                     default_model=self.settings.DEFAULT_GEMINI_MODEL,
                 )
                 logger.info("Google Gemini client initialized.")
@@ -253,7 +253,7 @@ class LLMService:
             #     # This part needs to be defined based on how local LLM health is determined
             #     pass
 
-            if provider != LLMProvider.LOCAL and (api_key is None or len(api_key.strip()) == 0):
+            if provider != LLMProvider.LOCAL and (api_key is None or len(api_key.get_secret_value().strip()) == 0):
                 status.status = StatusEnum.DEGRADED
                 status.message = f"API key not configured for {provider.value} (checked {api_key_name})"
                 status.details = {"configured": False, "reason": "missing_api_key"}
