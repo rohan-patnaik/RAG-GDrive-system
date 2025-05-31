@@ -1,246 +1,181 @@
+# netlify/functions/query.py
 import json
-import logging
 import os
 import sys
+import logging
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-# Adjust sys.path to include the project root (where 'backend' directory is located)
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-# Configure basic logging for the function
-# In a real Netlify environment, you might rely more on Netlify's own logging,
-# but this helps for local testing and provides a basic setup.
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# Global instance of RAGService to leverage Netlify's function instance reuse
-# and reduce cold start times for subsequent invocations.
-# This means RAGService (and its components like EmbeddingService) will be initialized
-# once per function instance, not on every request.
-rag_service_instance = None
-
-def init_rag_service():
-    """Initializes the RAGService if it hasn't been already."""
-    global rag_service_instance
-    if rag_service_instance is None:
-        logger.info("Initializing RAGService instance...")
-        try:
-            from backend.rag_system.services.rag_service import RAGService
-            # RAGService will load AppSettings and its components internally
-            rag_service_instance = RAGService()
-            logger.info("RAGService initialized successfully.")
-        except ImportError as e:
-            logger.error(f"Failed to import RAGService: {str(e)}." \
-                         f" Current sys.path: {sys.path}", exc_info=True)
-            # This error will be caught by the handler if init fails during a request
-            raise
-        except Exception as e:
-            logger.error(f"Error during RAGService initialization: {str(e)}", exc_info=True)
-            raise
-    return rag_service_instance
+# --- Path Setup ---
+try:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+except Exception as e:
+    print(f"Error setting up sys.path in query function: {e}", file=sys.stderr)
 
 
-async def process_query(event_body: str) -> Dict[str, Any]:
-    """
-    Helper async function to process the query using RAGService.
-    Separated to manage asyncio event loop if needed.
-    """
+# --- Imports from backend ---
+try:
+    from backend.rag_system.config.settings import AppSettings, get_settings, clear_settings_cache
+    from backend.rag_system.services.rag_service import RAGService
+    from backend.rag_system.services.embedding_service import EmbeddingService
+    from backend.rag_system.services.vector_store import VectorStoreService
+    from backend.rag_system.services.llm_service import LLMService
+    from backend.rag_system.core.document_loader import DocumentLoader
+    from backend.rag_system.core.text_processor import TextProcessor
     from backend.rag_system.models.schemas import QueryRequest, QueryResponse
-    from backend.rag_system.utils.exceptions import RAGBaseError
+    from backend.rag_system.utils.exceptions import BaseRAGError, QueryProcessingError, ConfigurationError
+    from pydantic import ValidationError
+except ImportError as e:
+    print(f"ImportError in query.py: {e}. Check sys.path and backend module availability.", file=sys.stderr)
+    class BaseRAGError(Exception): pass # type: ignore
+    class QueryRequest: # type: ignore
+        def __init__(self, **kwargs): raise NotImplementedError(f"QueryRequest not loaded: {e}")
+    class QueryResponse: # type: ignore
+        def __init__(self, **kwargs): raise NotImplementedError(f"QueryResponse not loaded: {e}")
+        def model_dump(self, **kwargs): return {"error": "QueryResponse not loaded", "detail": str(e)}
 
+
+# --- Logging ---
+logger = logging.getLogger("netlify.functions.query")
+logging.basicConfig(stream=sys.stderr, level=os.environ.get("LOG_LEVEL", "INFO").upper())
+
+
+# --- Global Instances for Caching ---
+_settings_cache: Optional[AppSettings] = None
+_rag_service_cache: Optional[RAGService] = None
+_initialization_error: Optional[str] = None
+
+def _get_cached_settings() -> AppSettings:
+    global _settings_cache
+    if _settings_cache is None:
+        logger.info("Initializing AppSettings for Netlify query function...")
+        _settings_cache = get_settings()
+        logger.info(f"AppSettings loaded in query: AppName='{_settings_cache.APP_NAME}', VectorProvider='{_settings_cache.VECTOR_STORE_PROVIDER}'")
+    return _settings_cache
+
+def _initialize_rag_service_if_needed() -> RAGService:
+    global _rag_service_cache, _initialization_error
+    if _rag_service_cache is not None:
+        return _rag_service_cache
+    if _initialization_error is not None:
+        raise ConfigurationError(f"RAGService previously failed to initialize: {_initialization_error}")
+
+    logger.info("Attempting to initialize RAGService for Netlify query function...")
     try:
-        rag_service = init_rag_service() # Get or initialize the service
-        if rag_service is None: # Should not happen if init_rag_service raises on failure
-             return {
-                "statusCode": 500,
-                "body": json.dumps({"error": "ServiceInitializationError", "message": "RAGService could not be initialized."})
-            }
+        current_settings = _get_cached_settings()
+        doc_loader = DocumentLoader()
+        text_processor = TextProcessor(
+            chunk_size=current_settings.CHUNK_SIZE,
+            chunk_overlap=current_settings.CHUNK_OVERLAP
+        )
+        embedding_service = EmbeddingService(settings=current_settings)
+        vector_store_service = VectorStoreService(settings=current_settings, embedding_service=embedding_service)
+        llm_service = LLMService(settings=current_settings)
 
-        try:
-            request_data = json.loads(event_body)
-            query_request = QueryRequest(**request_data)
-            logger.info(f"Parsed QueryRequest: {query_request.query_text[:50]}...")
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decoding error: {str(e)}", exc_info=True)
-            return {"statusCode": 400, "body": json.dumps({"error": "InvalidJSON", "message": str(e)})}
-        except Exception as e: # Catches Pydantic validation errors too
-            logger.error(f"Error parsing QueryRequest: {str(e)}", exc_info=True)
-            return {"statusCode": 400, "body": json.dumps({"error": "InvalidRequest", "message": str(e)})}
-
-        try:
-            query_response: QueryResponse = await rag_service.query(query_request)
-            logger.info(f"Successfully processed query. LLM answer: {query_response.llm_answer[:50]}...")
-            return {
-                "statusCode": 200,
-                "body": query_response.model_dump_json() # Use Pydantic's method for proper serialization
-            }
-        except RAGBaseError as e: # Catch custom errors from the RAG system
-            logger.error(f"RAGService query error: {e.message}", exc_info=True)
-            return {
-                "statusCode": e.status_code if hasattr(e, 'status_code') else 500,
-                "body": json.dumps({"error": e.error_type if hasattr(e, 'error_type') else type(e).__name__, "message": e.message, "detail": e.detail})
-            }
-        except Exception as e: # Catch any other unexpected error
-            logger.error(f"Unexpected error during query processing: {str(e)}", exc_info=True)
-            return {
-                "statusCode": 500,
-                "body": json.dumps({"error": "InternalServerError", "message": "An unexpected error occurred."})
-            }
-
-    except ImportError as e: # Catch import errors during lazy loading of schemas etc.
-        logger.error(f"ImportError during query processing: {str(e)}." \
-                     f" Current sys.path: {sys.path}", exc_info=True)
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": "ImportFailure", "message": "Failed to import backend modules for query processing."})
-        }
-    except Exception as e: # Catch errors from init_rag_service() or other unexpected setup issues
-        logger.error(f"Critical error in query function (e.g., service init): {str(e)}", exc_info=True)
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": "ServiceUnavailable", "message": f"The service is currently unavailable: {str(e)}"})
-        }
+        _rag_service_cache = RAGService(
+            settings=current_settings,
+            document_loader=doc_loader,
+            text_processor=text_processor,
+            embedding_service=embedding_service,
+            vector_store_service=vector_store_service,
+            llm_service=llm_service
+        )
+        logger.info("RAGService initialized successfully in query function.")
+        _initialization_error = None
+        return _rag_service_cache
+    except Exception as e:
+        _initialization_error = str(e)
+        logger.error(f"CRITICAL: Failed to initialize RAGService in query function: {e}", exc_info=True)
+        raise ConfigurationError(f"Failed to initialize RAGService: {e}")
 
 
+# --- Netlify Function Handler ---
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """
-    Netlify function handler for RAG queries.
-    """
-    logger.info("Query function invoked.")
-
     response_headers = {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",  # Adjust for production
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS" # Allow POST and OPTIONS
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Methods": "POST, OPTIONS", # Query is POST
     }
 
-    # Handle preflight OPTIONS requests for CORS
-    if event.get('httpMethod', '').upper() == 'OPTIONS':
-        logger.info("Handling OPTIONS preflight request for query endpoint.")
-        return {
-            "statusCode": 204, # No Content
-            "headers": response_headers,
-            "body": ""
-        }
+    http_method = event.get("httpMethod", "POST").upper()
 
-    if event.get('httpMethod', '').upper() != 'POST':
-        logger.warning(f"Query endpoint called with non-POST method: {event.get('httpMethod')}")
-        return {
-            "statusCode": 405, # Method Not Allowed
-            "headers": response_headers,
-            "body": json.dumps({"error": "MethodNotAllowed", "message": "Only POST requests are supported."})
-        }
+    if http_method == "OPTIONS":
+        return {"statusCode": 204, "headers": response_headers, "body": ""}
+    if http_method != "POST":
+        return {"statusCode": 405, "headers": response_headers, "body": json.dumps({"error": "Method Not Allowed"})}
 
-    event_body = event.get("body", "{}")
-    if not event_body: # Check for empty body
-        logger.warning("Received empty request body.")
-        return {
-            "statusCode": 400,
-            "headers": response_headers,
-            "body": json.dumps({"error": "InvalidRequest", "message": "Request body cannot be empty."})
-        }
+    logger.info(f"Query function invoked. Method: {http_method}")
 
-    # Netlify's Python runtime might handle top-level async handlers,
-    # but using asyncio.run() is a safe way to ensure the async code runs correctly.
-    # If the runtime already manages an event loop, asyncio.run() might not be ideal.
-    # However, for a simple `def handler`, it's common.
-    # A more advanced setup might use an ASGI adapter if Netlify supports it directly for plain functions.
     try:
-        # For Python 3.7+, asyncio.run can be used.
-        # If running in an environment that already has an event loop (like some serverless runtimes),
-        # this might need adjustment (e.g., just `await process_query(...)` if the handler itself can be async).
-        # Let's assume `asyncio.run` is safe here.
-        response = asyncio.run(process_query(event_body))
-    except RuntimeError as e:
-        # This can happen if asyncio.run() is called when an event loop is already running.
-        # In such cases, we might need to schedule the task differently.
-        # For now, log and return an error.
-        logger.error(f"RuntimeError with asyncio: {str(e)}. This might indicate an event loop issue.", exc_info=True)
-        response = {
-            "statusCode": 500,
-            "body": json.dumps({"error": "AsyncError", "message": "Error managing asynchronous operations."})
+        rag_service = _initialize_rag_service_if_needed()
+
+        event_body_str = event.get("body", "{}")
+        if not event_body_str:
+            logger.warning("Received empty request body for query.")
+            return {"statusCode": 400, "headers": response_headers, "body": json.dumps({"error": "Bad Request", "message": "Request body is empty."})}
+        
+        try:
+            request_data_dict = json.loads(event_body_str)
+            logger.info(f"Received query request data: {request_data_dict}")
+            query_request = QueryRequest(**request_data_dict)
+        except json.JSONDecodeError:
+            logger.error("Failed to decode JSON from request body.", exc_info=True)
+            return {"statusCode": 400, "headers": response_headers, "body": json.dumps({"error": "Bad Request", "message": "Invalid JSON format."})}
+        except ValidationError as ve:
+            logger.error(f"Validation error for QueryRequest: {ve.errors()}", exc_info=True)
+            return {"statusCode": 422, "headers": response_headers, "body": json.dumps({"error": "Unprocessable Entity", "detail": ve.errors()})}
+
+
+        query_response_model: QueryResponse = asyncio.run(rag_service.query(query_request))
+        response_body_dict = query_response_model.model_dump(mode="json")
+
+        logger.info(f"Query processed successfully for: '{query_request.query_text[:50]}...'")
+        return {
+            "statusCode": 200,
+            "headers": response_headers,
+            "body": json.dumps(response_body_dict),
         }
 
-    # Add common headers to the response
-    response["headers"] = response_headers
-    return response
+    except BaseRAGError as e:
+        logger.error(f"RAG Error during query processing: {type(e).__name__} - {e.message}", exc_info=True)
+        return {
+            "statusCode": getattr(e, 'status_code', 500),
+            "headers": response_headers,
+            "body": json.dumps({"error": e.error_type, "message": e.message, "detail": str(e.detail)}),
+        }
+    except Exception as e:
+        logger.error(f"Unexpected critical error during query processing: {e}", exc_info=True)
+        return {
+            "statusCode": 500,
+            "headers": response_headers,
+            "body": json.dumps({"error": "Internal Server Error", "message": "An unexpected error occurred."}),
+        }
 
-
-# Example for local testing (not run by Netlify)
+# --- Local Testing (Optional) ---
 if __name__ == "__main__":
-    logger.info("Running query function locally for testing...")
-
+    print("--- Running query.py locally for testing ---")
     # Mock event and context
-    mock_query_request_body = {
+    mock_query_body = {
         "query_text": "What is the capital of France?",
-        "llm_provider": "gemini", # Ensure your .env has GOOGLE_API_KEY for this to attempt
-        "top_k": 1
+        "llm_provider": "gemini" # Ensure your .env has GOOGLE_API_KEY
     }
-    mock_event = {
+    mock_event_post = {
         "httpMethod": "POST",
-        "body": json.dumps(mock_query_request_body)
+        "body": json.dumps(mock_query_body)
     }
     mock_context = None
-
-    # Ensure environment variables (PINECONE_API_KEY, etc.) are set in your local .env file
-    # for RAGService initialization to succeed.
-
-    # Test POST
-    response = handler(mock_event, mock_context)
-    print("\n--- Test POST Response ---")
+    
+    print("\n--- Testing POST request ---")
+    # Ensure your .env is configured, especially PINECONE keys and LLM keys
+    # Also, ensure you have ingested some data into your Pinecone index.
+    # If testing ingestion first, comment out this query test.
+    response_post = handler(mock_event_post, mock_context)
+    print(f"Status Code: {response_post['statusCode']}")
     try:
-        # Try to pretty-print if body is JSON, otherwise print as is
-        body_content = json.loads(response.get("body", "{}"))
-        print(json.dumps(body_content, indent=2))
+        print("Body:", json.dumps(json.loads(response_post.get("body", "{}")), indent=2))
     except json.JSONDecodeError:
-        print(response.get("body"))
-    print(f"Status Code: {response.get('statusCode')}")
-
-
-    # Test OPTIONS
-    mock_event_options = {"httpMethod": "OPTIONS"}
-    response_options = handler(mock_event_options, mock_context)
-    print("\n--- Test OPTIONS Response ---")
-    print(json.dumps(response_options, indent=2))
-
-
-    # Test GET (should be rejected)
-    mock_event_get = {"httpMethod": "GET"}
-    response_get = handler(mock_event_get, mock_context)
-    print("\n--- Test GET Response (expect 405) ---")
-    try:
-        body_content = json.loads(response_get.get("body", "{}"))
-        print(json.dumps(body_content, indent=2))
-    except json.JSONDecodeError:
-        print(response_get.get("body"))
-    print(f"Status Code: {response_get.get('statusCode')}")
-
-    # Test empty body
-    mock_event_empty_body = {"httpMethod": "POST", "body": ""}
-    response_empty_body = handler(mock_event_empty_body, mock_context)
-    print("\n--- Test Empty Body POST Response (expect 400) ---")
-    try:
-        body_content = json.loads(response_empty_body.get("body", "{}"))
-        print(json.dumps(body_content, indent=2))
-    except json.JSONDecodeError:
-        print(response_empty_body.get("body"))
-    print(f"Status Code: {response_empty_body.get('statusCode')}")
-
-
-    # Test invalid JSON
-    mock_event_invalid_json = {"httpMethod": "POST", "body": "{'query_text': 'test'"} # Invalid JSON
-    response_invalid_json = handler(mock_event_invalid_json, mock_context)
-    print("\n--- Test Invalid JSON POST Response (expect 400) ---")
-    try:
-        body_content = json.loads(response_invalid_json.get("body", "{}"))
-        print(json.dumps(body_content, indent=2))
-    except json.JSONDecodeError:
-        print(response_invalid_json.get("body"))
-    print(f"Status Code: {response_invalid_json.get('statusCode')}")
-
-    logger.info("Local query function test finished.")
-```
+        print("Body (raw):", response_post.get("body"))
+    print("--- End of local test ---")

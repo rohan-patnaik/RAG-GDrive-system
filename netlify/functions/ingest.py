@@ -1,215 +1,279 @@
+# netlify/functions/ingest.py
 import json
-import logging
 import os
 import sys
+import logging
 import asyncio
-import cgi
-import base64
-import tempfile
-import shutil
-from typing import Dict, Any, List
-from io import BytesIO
+import cgi # For parsing multipart/form-data
+import io # For BytesIO
+import base64 # If files are base64 encoded in the event
+from typing import Dict, Any, Optional, List, Tuple
 
-# Adjust sys.path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+# --- Path Setup ---
+try:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+except Exception as e:
+    print(f"Error setting up sys.path in ingest function: {e}", file=sys.stderr)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# --- Imports from backend ---
+try:
+    from backend.rag_system.config.settings import AppSettings, get_settings, clear_settings_cache
+    from backend.rag_system.services.rag_service import RAGService
+    from backend.rag_system.services.embedding_service import EmbeddingService
+    from backend.rag_system.services.vector_store import VectorStoreService
+    from backend.rag_system.services.llm_service import LLMService
+    from backend.rag_system.core.document_loader import DocumentLoader
+    from backend.rag_system.core.text_processor import TextProcessor
+    from backend.rag_system.models.schemas import IngestionResponse # Assuming this is the correct response model
+    from backend.rag_system.utils.exceptions import BaseRAGError, DocumentProcessingError, ConfigurationError
+except ImportError as e:
+    print(f"ImportError in ingest.py: {e}. Check sys.path and backend module availability.", file=sys.stderr)
+    class BaseRAGError(Exception): pass # type: ignore
+    class IngestionResponse: # type: ignore
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def model_dump(self, **kwargs): return {"error": "IngestionResponse not loaded", "detail": str(e)}
 
-# Global RAGService instance
-rag_service_instance = None
 
-def init_rag_service():
-    global rag_service_instance
-    if rag_service_instance is None:
-        logger.info("Initializing RAGService for ingest function...")
+# --- Logging ---
+logger = logging.getLogger("netlify.functions.ingest")
+logging.basicConfig(stream=sys.stderr, level=os.environ.get("LOG_LEVEL", "INFO").upper())
+
+# --- Global Instances for Caching ---
+_settings_cache: Optional[AppSettings] = None
+_rag_service_cache: Optional[RAGService] = None
+_initialization_error: Optional[str] = None
+
+
+def _get_cached_settings() -> AppSettings:
+    global _settings_cache
+    if _settings_cache is None:
+        logger.info("Initializing AppSettings for Netlify ingest function...")
+        _settings_cache = get_settings()
+        logger.info(f"AppSettings loaded in ingest: AppName='{_settings_cache.APP_NAME}', VectorProvider='{_settings_cache.VECTOR_STORE_PROVIDER}'")
+    return _settings_cache
+
+def _initialize_rag_service_if_needed() -> RAGService:
+    global _rag_service_cache, _initialization_error
+    if _rag_service_cache is not None:
+        return _rag_service_cache
+    if _initialization_error is not None:
+        raise ConfigurationError(f"RAGService previously failed to initialize: {_initialization_error}")
+
+    logger.info("Attempting to initialize RAGService for Netlify ingest function...")
+    try:
+        current_settings = _get_cached_settings()
+        doc_loader = DocumentLoader()
+        text_processor = TextProcessor(
+            chunk_size=current_settings.CHUNK_SIZE,
+            chunk_overlap=current_settings.CHUNK_OVERLAP
+        )
+        embedding_service = EmbeddingService(settings=current_settings)
+        vector_store_service = VectorStoreService(settings=current_settings, embedding_service=embedding_service)
+        llm_service = LLMService(settings=current_settings) # Not directly used by ingest, but part of RAGService
+
+        _rag_service_cache = RAGService(
+            settings=current_settings,
+            document_loader=doc_loader,
+            text_processor=text_processor,
+            embedding_service=embedding_service,
+            vector_store_service=vector_store_service,
+            llm_service=llm_service
+        )
+        logger.info("RAGService initialized successfully in ingest function.")
+        _initialization_error = None
+        return _rag_service_cache
+    except Exception as e:
+        _initialization_error = str(e)
+        logger.error(f"CRITICAL: Failed to initialize RAGService in ingest function: {e}", exc_info=True)
+        raise ConfigurationError(f"Failed to initialize RAGService: {e}")
+
+def _parse_multipart_form_data(event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Parses multipart/form-data from the Netlify event.
+    Assumes 'cgi.FieldStorage' can handle the body.
+    """
+    uploaded_files_data: List[Dict[str, Any]] = []
+    
+    content_type_header = event.get('headers', {}).get('content-type', 
+                                                    event.get('headers', {}).get('Content-Type', ''))
+    
+    if 'multipart/form-data' not in content_type_header:
+        logger.warning(f"Content-Type is not multipart/form-data: {content_type_header}")
+        # Could try to handle as single file if body is just raw content, but less robust
+        return []
+
+    body_str = event.get('body', '')
+    is_base64_encoded = event.get('isBase64Encoded', False)
+
+    if is_base64_encoded:
         try:
-            from backend.rag_system.services.rag_service import RAGService
-            rag_service_instance = RAGService()
-            logger.info("RAGService initialized successfully for ingest.")
+            body_bytes = base64.b64decode(body_str)
         except Exception as e:
-            logger.error(f"Error during RAGService initialization for ingest: {str(e)}", exc_info=True)
-            raise
-    return rag_service_instance
+            logger.error(f"Failed to base64 decode body: {e}")
+            return [] # Or raise error
+    else:
+        # For multipart/form-data, the body might be a string that needs to be encoded
+        # to bytes using an encoding that preserves the binary data (like latin-1 or utf-8 with error handling)
+        # cgi.FieldStorage expects a file-like object of bytes.
+        try:
+            body_bytes = body_str.encode('latin-1') # Common for HTTP bodies if not specified
+        except Exception as e:
+            logger.warning(f"Could not encode body string as latin-1 for cgi parser, trying utf-8: {e}")
+            try:
+                body_bytes = body_str.encode('utf-8') # try utf-8
+            except Exception as e2:
+                logger.error(f"Failed to encode body string as bytes for cgi parser: {e2}")
+                return []
 
-async def process_ingestion(event: Dict[str, Any]) -> Dict[str, Any]:
-    from backend.rag_system.models.schemas import IngestionRequest, IngestionResponse
-    from backend.rag_system.utils.exceptions import RAGBaseError
 
-    temp_request_dir = None # To store path to temporary directory for this request
+    # Create a file-like object for cgi.FieldStorage
+    fp = io.BytesIO(body_bytes)
+
+    # Prepare environment for cgi.FieldStorage
+    # It needs CONTENT_TYPE and CONTENT_LENGTH (if available)
+    environ = {
+        'REQUEST_METHOD': 'POST',
+        'CONTENT_TYPE': content_type_header,
+        'CONTENT_LENGTH': str(len(body_bytes)) # Calculate length of the byte body
+    }
 
     try:
-        rag_service = init_rag_service()
-        if not rag_service:
-             return {"statusCode": 500, "body": json.dumps({"error": "ServiceInitializationError", "message": "RAGService could not be initialized for ingestion."})}
-
-        # Parse multipart/form-data
-        content_type_header = event.get('headers', {}).get('content-type', event.get('headers', {}).get('Content-Type', ''))
-        if not content_type_header or 'multipart/form-data' not in content_type_header.lower():
-            logger.warning(f"Invalid content type: {content_type_header}")
-            return {"statusCode": 400, "body": json.dumps({"error": "InvalidContentType", "message": "Request must be multipart/form-data."})}
-
-        # Decode body if base64 encoded
-        request_body_str = event.get('body', '')
-        if event.get('isBase64Encoded', False):
-            logger.info("Request body is base64 encoded. Decoding...")
-            try:
-                request_body_bytes = base64.b64decode(request_body_str)
-            except Exception as e:
-                logger.error(f"Base64 decoding failed: {str(e)}", exc_info=True)
-                return {"statusCode": 400, "body": json.dumps({"error": "InvalidRequestBody", "message": "Failed to decode base64 body."})}
-        else:
-            # For cgi.FieldStorage, it might expect bytes, but sometimes works with string if headers are right.
-            # Let's try to encode to latin-1 as cgi module sometimes has issues with UTF-8 strings directly.
-            try:
-                request_body_bytes = request_body_str.encode('latin-1') # Common encoding for HTTP bodies if not specified
-            except Exception as e: # Fallback if it's already bytes somehow or other issue
-                 logger.warning(f"Could not encode body string to latin-1, using raw string if it's an error: {e}")
-                 if isinstance(request_body_str, str): # if it's a string, needs encoding
-                    request_body_bytes = request_body_str.encode('utf-8') # try utf-8
-                 else: # if it's already bytes, use as is (should not happen often with Netlify event['body'])
-                    request_body_bytes = request_body_str
-
-
-        # Prepare fp and headers for cgi.FieldStorage
-        fp = BytesIO(request_body_bytes)
-        environ = {'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': content_type_header, 'CONTENT_LENGTH': str(len(request_body_bytes))}
-
-        try:
-            form = cgi.FieldStorage(fp=fp, environ=environ, keep_blank_values=True)
-        except Exception as e:
-            logger.error(f"Failed to parse multipart form data: {str(e)}", exc_info=True)
-            return {"statusCode": 400, "body": json.dumps({"error": "FormParsingError", "message": f"Could not parse form data: {str(e)}"})}
-
-        if not form.list:
-             logger.warning("Received empty form or FieldStorage could not parse fields.")
-             return {"statusCode": 400, "body": json.dumps({"error": "EmptyForm", "message": "No files or form fields found in the request."})}
-
-        # Create a unique temporary directory for this request's files
-        # Netlify functions can write to /tmp
-        temp_request_dir = tempfile.mkdtemp(prefix="rag_ingest_")
-        logger.info(f"Created temporary directory for uploaded files: {temp_request_dir}")
-
-        file_patterns = ["*.*"] # Process all files saved in the temp dir
-        saved_files_count = 0
-
+        form = cgi.FieldStorage(fp=fp, environ=environ, keep_blank_values=True)
+        
         for field_name in form.keys():
             field_item = form[field_name]
-            if isinstance(field_item, list): # Multiple files with same name
+            
+            if isinstance(field_item, list): # Multiple files with the same field name
                 for item in field_item:
-                    if item.filename:
-                        file_content = item.file.read()
-                        file_path = os.path.join(temp_request_dir, item.filename)
-                        with open(file_path, 'wb') as f:
-                            f.write(file_content)
-                        logger.info(f"Saved uploaded file to temporary path: {file_path}")
-                        saved_files_count += 1
-            elif field_item.filename: # Single file
-                file_content = field_item.file.read()
-                file_path = os.path.join(temp_request_dir, field_item.filename)
-                with open(file_path, 'wb') as f:
-                    f.write(file_content)
-                logger.info(f"Saved uploaded file to temporary path: {file_path}")
-                saved_files_count +=1
-            else:
-                # Handle other form fields if necessary, e.g., parameters
-                # For now, we only care about files.
-                logger.info(f"Skipping non-file form field: {field_name}")
+                    if item.filename and item.file:
+                        file_content_bytes = item.file.read()
+                        uploaded_files_data.append({
+                            "filename": item.filename,
+                            "content_bytes": file_content_bytes
+                        })
+                        logger.info(f"Parsed uploaded file (list item): {item.filename}, size: {len(file_content_bytes)} bytes")
+            elif field_item.filename and field_item.file: # Single file
+                file_content_bytes = field_item.file.read()
+                uploaded_files_data.append({
+                    "filename": field_item.filename,
+                    "content_bytes": file_content_bytes
+                })
+                logger.info(f"Parsed uploaded file (single item): {field_item.filename}, size: {len(file_content_bytes)} bytes")
+            # else:
+                # logger.debug(f"Skipping form field '{field_name}' as it's not a file upload.")
 
-        if saved_files_count == 0:
-            logger.warning("No files were uploaded or saved from the form.")
-            # Clean up temp dir if created
-            if temp_request_dir:
-                shutil.rmtree(temp_request_dir)
-                logger.info(f"Cleaned up empty temporary directory: {temp_request_dir}")
-            return {"statusCode": 400, "body": json.dumps({"error": "NoFilesUploaded", "message": "No files found in the upload request."})}
-
-        # Call RAGService to ingest from the temporary directory
-        ingestion_request = IngestionRequest(
-            source_directory=temp_request_dir,
-            file_patterns=file_patterns, # Process all files we just saved
-            recursive=False # Files are directly in temp_request_dir
-        )
-
-        logger.info(f"Calling RAGService.ingest_documents for directory: {temp_request_dir}")
-        ingestion_response: IngestionResponse = await rag_service.ingest_documents(ingestion_request)
-
-        return {
-            "statusCode": 200,
-            "body": ingestion_response.model_dump_json()
-        }
-
-    except RAGBaseError as e:
-        logger.error(f"RAGService ingest error: {e.message}", exc_info=True)
-        return {"statusCode": e.status_code if hasattr(e, 'status_code') else 500, "body": json.dumps({"error": e.error_type if hasattr(e, 'error_type') else type(e).__name__, "message": e.message, "detail": e.detail})}
     except Exception as e:
-        logger.error(f"Unexpected error during ingestion processing: {str(e)}", exc_info=True)
-        return {"statusCode": 500, "body": json.dumps({"error": "InternalServerError", "message": f"An unexpected error occurred: {str(e)}"})}
-    finally:
-        # Clean up the temporary directory
-        if temp_request_dir and os.path.exists(temp_request_dir):
-            try:
-                shutil.rmtree(temp_request_dir)
-                logger.info(f"Successfully cleaned up temporary directory: {temp_request_dir}")
-            except Exception as e:
-                logger.error(f"Error cleaning up temporary directory {temp_request_dir}: {e}", exc_info=True)
+        logger.error(f"Error parsing multipart/form-data with cgi: {e}", exc_info=True)
+        # This might happen if the body is not well-formed multipart
+
+    if not uploaded_files_data:
+        logger.warning("No files successfully parsed from multipart/form-data.")
+
+    return uploaded_files_data
 
 
+# --- Netlify Function Handler ---
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    logger.info("Ingest function invoked.")
-
     response_headers = {
         "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*", # Adjust for production
-        "Access-Control-Allow-Headers": "Content-Type, Authorization", # Allow Content-Type and Auth
-        "Access-Control-Allow-Methods": "POST, OPTIONS"
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization", # Allow Content-Type for multipart
+        "Access-Control-Allow-Methods": "POST, OPTIONS", # Ingest is POST
     }
 
-    if event.get('httpMethod', '').upper() == 'OPTIONS':
-        logger.info("Handling OPTIONS preflight request for ingest endpoint.")
-        return {"statusCode": 204, "headers": response_headers, "body": ""}
+    http_method = event.get("httpMethod", "POST").upper()
 
-    if event.get('httpMethod', '').upper() != 'POST':
-        logger.warning(f"Ingest endpoint called with non-POST method: {event.get('httpMethod')}")
-        return {"statusCode": 405, "headers": response_headers, "body": json.dumps({"error": "MethodNotAllowed", "message": "Only POST requests are supported."})}
+    if http_method == "OPTIONS":
+        return {"statusCode": 204, "headers": response_headers, "body": ""}
+    if http_method != "POST":
+        return {"statusCode": 405, "headers": response_headers, "body": json.dumps({"error": "Method Not Allowed"})}
+
+    logger.info(f"Ingest function invoked. Method: {http_method}, Headers: {event.get('headers')}")
 
     try:
-        response = asyncio.run(process_ingestion(event))
-    except RuntimeError as e:
-        logger.error(f"RuntimeError with asyncio for ingest: {str(e)}.", exc_info=True)
-        response = {"statusCode": 500, "body": json.dumps({"error": "AsyncError", "message": "Error managing asynchronous operations for ingest."})}
+        rag_service = _initialize_rag_service_if_needed()
+        
+        # Parse uploaded files from the event
+        # This part is highly dependent on how Netlify (and API Gateway, if any) passes multipart/form-data
+        uploaded_files_data = _parse_multipart_form_data(event)
 
-    # Ensure headers are part of the final response
-    if "headers" not in response:
-        response["headers"] = {}
-    response["headers"].update(response_headers)
+        if not uploaded_files_data:
+            logger.warning("No files found in the request for ingestion.")
+            return {
+                "statusCode": 400,
+                "headers": response_headers,
+                "body": json.dumps({"error": "Bad Request", "message": "No files provided for ingestion or failed to parse."})
+            }
+        
+        logger.info(f"Attempting to ingest {len(uploaded_files_data)} parsed files.")
+        ingestion_response_model: IngestionResponse = asyncio.run(
+            rag_service.ingest_uploaded_documents(uploaded_files_data)
+        )
+        response_body_dict = ingestion_response_model.model_dump(mode="json")
 
-    return response
+        logger.info(f"Ingestion process completed. Message: {ingestion_response_model.message}")
+        return {
+            "statusCode": 201, # 201 Created is often used for successful ingestion
+            "headers": response_headers,
+            "body": json.dumps(response_body_dict),
+        }
 
-# Example for local testing (requires more setup for multipart form data)
+    except BaseRAGError as e:
+        logger.error(f"RAG Error during ingestion: {type(e).__name__} - {e.message}", exc_info=True)
+        return {
+            "statusCode": getattr(e, 'status_code', 500),
+            "headers": response_headers,
+            "body": json.dumps({"error": e.error_type, "message": e.message, "detail": str(e.detail)}),
+        }
+    except Exception as e:
+        logger.error(f"Unexpected critical error during ingestion: {e}", exc_info=True)
+        return {
+            "statusCode": 500,
+            "headers": response_headers,
+            "body": json.dumps({"error": "Internal Server Error", "message": "An unexpected error occurred during ingestion."}),
+        }
+
+# --- Local Testing (Optional - More Complex for Multipart) ---
 if __name__ == "__main__":
-    logger.info("Running ingest function locally for testing (requires manual multipart body setup)...")
+    print("--- Running ingest.py locally for testing (Multipart is tricky here) ---")
     # To test this locally, you'd need to construct a mock 'event' dictionary
     # that accurately simulates a Netlify multipart/form-data request.
-    # This includes base64 encoding the body and setting correct Content-Type headers.
-    # This is non-trivial to do directly in a simple script.
-    # Consider using a tool like Postman or `curl` to send a multipart/form-data
-    # request to a locally running Netlify Dev server (`netlify dev`).
+    # This is non-trivial. It's often easier to test with `netlify dev` or by deploying.
 
-    # A very simplified mock event (likely won't work fully with cgi.FieldStorage without a proper body):
-    mock_event_empty_form = {
-        "httpMethod": "POST",
-        "headers": {"content-type": "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW"},
-        "body": "", # A real body would be complex and base64 encoded
-        "isBase64Encoded": False
-    }
-
-    print("\n--- Test Empty Form POST (will likely fail parsing or show no files) ---")
-    # response = handler(mock_event_empty_form, None)
-    # print(json.dumps(response, indent=2))
-    print("Local testing of multipart/form-data is complex. Use 'netlify dev' and a tool like Postman.")
-
-    logger.info("Local ingest function test finished.")
-```
+    # Example of a very basic mock (actual Netlify event is more complex):
+    # file_content = "This is a test file for local ingest."
+    # boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+    # body_parts = [
+    #     f"--{boundary}",
+    #     'Content-Disposition: form-data; name="files"; filename="test.txt"',
+    #     'Content-Type: text/plain',
+    #     '',
+    #     file_content,
+    #     f"--{boundary}--",
+    #     ''
+    # ]
+    # mock_body = "\r\n".join(body_parts)
+    
+    # mock_event_post_multipart = {
+    #     "httpMethod": "POST",
+    #     "headers": {
+    #         "content-type": f"multipart/form-data; boundary={boundary}",
+    #         "Content-Type": f"multipart/form-data; boundary={boundary}" # Case variations
+    #     },
+    #     "body": mock_body, # For cgi, this needs to be bytes
+    #     "isBase64Encoded": False
+    # }
+    # mock_context = None
+    
+    # print("\n--- Testing POST request (mocked multipart) ---")
+    # # Ensure .env is configured
+    # # response_post = handler(mock_event_post_multipart, mock_context)
+    # # print(f"Status Code: {response_post['statusCode']}")
+    # # try:
+    # #     print("Body:", json.dumps(json.loads(response_post.get("body", "{}")), indent=2))
+    # # except json.JSONDecodeError:
+    # #     print("Body (raw):", response_post.get("body"))
+    print("Local testing of multipart ingest is complex. Use `netlify dev` or deploy.")
+    print("--- End of local test ---")
