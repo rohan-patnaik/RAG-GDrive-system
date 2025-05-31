@@ -81,6 +81,84 @@ class DocumentLoader:
         logger.info(f"Loaded {len(documents)} documents from {source_directory}.")
         return documents
 
+    def load_from_uploaded_file(
+        self,
+        file_name: str,
+        file_content: bytes,
+    ) -> List[Document]:
+        """
+        Loads a document from in-memory file content (e.g., an uploaded file).
+
+        Args:
+            file_name: The original name of the file (e.g., "mydoc.txt").
+            file_content: The raw byte content of the file.
+
+        Returns:
+            A list containing a single Document object, or an empty list if processing fails.
+        """
+        logger.info(f"Attempting to load document from uploaded file: {file_name}")
+        documents: List[Document] = []
+        file_extension = Path(file_name).suffix.lower()
+
+        try:
+            # Determine content based on file type
+            processed_content: Optional[str] = None
+            if file_extension == ".txt":
+                processed_content = file_content.decode("utf-8")
+            elif file_extension == ".md":
+                processed_content = file_content.decode("utf-8")
+            # Add more file types here, e.g., .csv, .json
+            # For PDF, you would use a library like PyMuPDF (fitz) or pdfminer.six with the bytes
+            # Example for PDF (conceptual, requires library):
+            # elif file_extension == ".pdf":
+            #     import fitz  # PyMuPDF
+            #     pdf_doc = fitz.open(stream=file_content, filetype="pdf")
+            #     processed_content = ""
+            #     for page_num in range(len(pdf_doc)):
+            #         page = pdf_doc.load_page(page_num)
+            #         processed_content += page.get_text()
+            #     pdf_doc.close()
+            else:
+                logger.warning(
+                    f"Unsupported file type '{file_extension}' for uploaded file: {file_name}. Skipping."
+                )
+                return documents
+
+            if processed_content is not None:
+                # Create DocumentMetadata
+                # source_id could be the filename or a unique ID generated for the upload session
+                metadata = DocumentMetadata(
+                    source_id=f"uploaded_{file_name}", # Make it somewhat unique
+                    filename=file_name,
+                    # path could be None or indicate it's an upload
+                )
+                # Create Document object
+                # ID could be derived from filename or a UUID
+                doc_id = Path(file_name).stem
+                doc = Document(
+                    id=doc_id,
+                    content=processed_content,
+                    metadata=metadata,
+                )
+                documents.append(doc)
+                logger.debug(f"Successfully processed uploaded file: {file_name} into a Document object.")
+
+        except UnicodeDecodeError as e:
+            logger.error(
+                f"UnicodeDecodeError for file {file_name} (extension {file_extension}): {e}. "
+                "File may not be UTF-8 encoded or is binary."
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to process uploaded file {file_name}: {e}",
+                exc_info=True,
+            )
+
+        if documents:
+             logger.info(f"Successfully loaded 1 document from uploaded file: {file_name}")
+        return documents
+
+
     # Placeholder for future PDF loading
     def load_pdf(self, file_path: Path | str) -> Optional[Document]:
         """

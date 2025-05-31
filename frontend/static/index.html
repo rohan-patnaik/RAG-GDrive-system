@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Query System - RAG App</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>RAG System</h1>
+        <nav>
+            <a href="index.html" class="active">Query</a>
+            <a href="ingest.html">Ingest Documents</a>
+            <a href="status.html">System Status</a>
+        </nav>
+    </header>
+    <main>
+        <section id="query-section">
+            <h2>Query Your Documents</h2>
+            <textarea id="query-text" placeholder="Enter your question..."></textarea>
+            <button id="submit-query">Get Answer</button>
+            <div id="query-results">
+                <!-- Results will be displayed here -->
+            </div>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2024 RAG Application</p>
+    </footer>
+    <script src="js/api.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

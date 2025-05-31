@@ -1,151 +1,181 @@
 # backend/rag_system/core/vector_store.py
 import logging
+import json # For serializing metadata if necessary
 from typing import List, Optional, Dict, Any, Tuple
+from pathlib import Path # For example usage if kept
 
-import chromadb
-from chromadb.api.models.Collection import Collection as ChromaCollection
-from chromadb.utils import embedding_functions
+from pinecone import Pinecone, Index, ApiException
+from pinecone.core.client.models import Vector
 
 from rag_system.models.schemas import DocumentChunk, DocumentMetadata, RetrievedChunk
-from rag_system.utils.exceptions import EmbeddingError, VectorStoreError
+# DocumentChunk will need an `embedding` field or a new `DocumentChunkWithEmbedding` model
+from rag_system.utils.exceptions import VectorStoreError, EmbeddingError # EmbeddingError for consistency
 from rag_system.config.settings import AppSettings, get_settings
-from rag_system.core.embeddings import EmbeddingService # For embedding dimension
+from rag_system.core.embeddings import EmbeddingService # Kept for embedding_dimension
 
 logger = logging.getLogger(__name__)
 
 
 class VectorStoreService:
     """
-    Service for interacting with a ChromaDB vector store.
+    Service for interacting with a Pinecone vector store.
     Manages adding, searching, and deleting document chunks.
+    Embeddings are assumed to be pre-computed and provided with the chunks.
     """
 
     def __init__(
         self,
         settings: Optional[AppSettings] = None,
-        embedding_service: Optional[EmbeddingService] = None, # Pass if using external embeddings
+        embedding_service: Optional[EmbeddingService] = None, # Primarily for dimension info
     ):
         """
-        Initializes the VectorStoreService.
+        Initializes the VectorStoreService for Pinecone.
 
         Args:
             settings: Application settings. If None, loads default settings.
-            embedding_service: An instance of EmbeddingService. Required if not using Chroma's
-                               default sentence transformer. If provided, its model name will
-                               be used for Chroma's ef.
+            embedding_service: An instance of EmbeddingService. Used to get embedding dimension.
+
+        Raises:
+            VectorStoreError: If configuration is missing or Pinecone initialization fails.
         """
         if settings is None:
             settings = get_settings()
 
-        self.persist_directory: str = settings.VECTOR_STORE_PATH
-        self.collection_name: str = settings.CHROMA_COLLECTION_NAME
-        self._embedding_service = embedding_service # Store for potential use (e.g. dimension)
+        if settings.VECTOR_STORE_PROVIDER != "pinecone":
+            msg = "VectorStoreService is configured for Pinecone, but provider is " \
+                  f"'{settings.VECTOR_STORE_PROVIDER}'."
+            logger.error(msg)
+            raise VectorStoreError(msg)
 
-        # Determine embedding function for ChromaDB
-        # If an embedding_service is provided and has a model_name, use it.
-        # Otherwise, ChromaDB will use its default if ef is not specified or is SentenceTransformerEmbeddingFunction.
-        chroma_ef = None
-        if self._embedding_service and self._embedding_service.model_name:
-            logger.info(f"Using embedding model '{self._embedding_service.model_name}' for ChromaDB.")
-            chroma_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=self._embedding_service.model_name,
-                device=self._embedding_service.device or "cpu" # Ensure device is passed
-            )
-        else:
-            # Fallback to default SentenceTransformer if no specific model from EmbeddingService
-            # This is Chroma's default behavior if ef is not set, but explicit can be clearer.
-            default_ef_model = settings.EMBEDDING_MODEL_NAME # Use the one from settings
-            logger.info(f"Using default embedding model '{default_ef_model}' for ChromaDB.")
-            chroma_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=default_ef_model,
-                device=settings.EMBEDDING_MODEL_DEVICE or "cpu"
-            )
+        if not all([settings.PINECONE_API_KEY, settings.PINECONE_ENVIRONMENT, settings.PINECONE_INDEX_NAME]):
+            msg = "Pinecone API key, environment, or index name is missing in settings."
+            logger.error(msg)
+            raise VectorStoreError(msg)
 
+        self.index_name: str = settings.PINECONE_INDEX_NAME
+        self._embedding_service = embedding_service # Store for embedding dimension
 
         try:
-            logger.info(
-                f"Initializing ChromaDB client with persistence directory: {self.persist_directory}"
-            )
-            self.client = chromadb.PersistentClient(path=self.persist_directory)
-
-            # Get or create the collection
-            # We pass the embedding function here. If it's None, Chroma uses its default.
-            logger.info(f"Getting or creating ChromaDB collection: {self.collection_name}")
-            self.collection: ChromaCollection = self.client.get_or_create_collection(
-                name=self.collection_name,
-                embedding_function=chroma_ef, # Can be None for Chroma's default
-                # metadata={"hnsw:space": "cosine"} # Example: configure distance metric
-            )
-            logger.info(
-                f"Vector store initialized. Collection '{self.collection_name}' ready. "
-                f"Items in collection: {self.collection.count()}"
+            logger.info("Initializing Pinecone client...")
+            pinecone_client = Pinecone(
+                api_key=settings.PINECONE_API_KEY.get_secret_value(),
+                environment=settings.PINECONE_ENVIRONMENT,
             )
 
+            logger.info(f"Connecting to Pinecone index: '{self.index_name}'")
+            if self.index_name not in pinecone_client.list_indexes().names:
+                msg = f"Pinecone index '{self.index_name}' does not exist."
+                logger.error(msg)
+                # Note: Index creation is usually a separate setup step, not done on-the-fly here.
+                # If dynamic creation were desired, it would require knowing dimensions, metric type, etc.
+                # For example:
+                # if self._embedding_service:
+                #     dimension = self._embedding_service.get_embedding_dimension()
+                #     pinecone_client.create_index(self.index_name, dimension=dimension, metric='cosine')
+                # else:
+                #    raise VectorStoreError("Embedding service needed to get dimension for index creation.")
+                raise VectorStoreError(msg)
+
+            self.index: Index = pinecone_client.Index(self.index_name)
+
+            stats = self.index.describe_index_stats()
+            logger.info(
+                f"Successfully connected to Pinecone index '{self.index_name}'. "
+                f"Total vectors: {stats.get('total_vector_count', 0)}"
+            )
+
+        except ApiException as e:
+            logger.error(f"Pinecone API error during initialization: {e}", exc_info=True)
+            raise VectorStoreError(f"Pinecone API error: {e.reason}") from e
         except Exception as e:
-            logger.error(
-                f"Failed to initialize ChromaDB client or collection '{self.collection_name}': {e}",
-                exc_info=True,
-            )
-            raise VectorStoreError(
-                "ChromaDB client/collection initialization failed."
-            ) from e
+            logger.error(f"Failed to initialize Pinecone client or index '{self.index_name}': {e}", exc_info=True)
+            raise VectorStoreError("Pinecone client/index initialization failed.") from e
+
+    def _serialize_metadata(self, metadata: DocumentMetadata) -> Dict[str, Any]:
+        """
+        Serializes DocumentMetadata to a flat dictionary suitable for Pinecone.
+        Pinecone metadata values can be string, number, boolean, or list of strings.
+        Complex nested objects need to be flattened or serialized (e.g., to JSON strings).
+        """
+        meta_dict = metadata.model_dump(exclude_none=True)
+
+        # Example: Flatten 'custom_fields' if it's a dict.
+        # Pinecone supports nested metadata up to a certain depth, but direct key-value is safer.
+        # For simplicity, we'll ensure all custom_fields are strings or lists of strings.
+        # More complex serialization might be needed for arbitrary custom_fields.
+
+        serialized_meta: Dict[str, Any] = {}
+        for k, v in meta_dict.items():
+            if isinstance(v, dict): # E.g. custom_fields
+                 # Serialize dicts to JSON strings or flatten them
+                 # For now, let's assume simple custom_fields or they are pre-processed
+                 for ck, cv in v.items():
+                     if isinstance(cv, (str, int, float, bool, list)):
+                         serialized_meta[f"custom_{ck}"] = cv
+                     else:
+                         serialized_meta[f"custom_{ck}"] = str(cv) # Fallback to string
+            elif isinstance(v, (str, int, float, bool, list)):
+                serialized_meta[k] = v
+            else:
+                serialized_meta[k] = str(v) # Fallback for other types
+
+        # Ensure content of lists are strings for Pinecone
+        for k, v in serialized_meta.items():
+            if isinstance(v, list):
+                serialized_meta[k] = [str(item) for item in v]
+
+        return serialized_meta
+
 
     def add_chunks(self, chunks: List[DocumentChunk]) -> None:
         """
-        Adds document chunks to the vector store.
-        Embeddings are generated by ChromaDB's configured embedding function.
+        Adds document chunks with pre-computed embeddings to the Pinecone index.
 
         Args:
-            chunks: A list of DocumentChunk objects. Embeddings should NOT be pre-populated
-                    if ChromaDB is to generate them.
+            chunks: A list of DocumentChunk objects. Each chunk MUST have its `embedding`
+                    field populated with a valid vector.
 
         Raises:
-            VectorStoreError: If adding chunks fails.
+            VectorStoreError: If adding chunks fails or embeddings are missing.
+            EmbeddingError: If a chunk is missing its embedding.
         """
         if not chunks:
             logger.info("No chunks provided to add to the vector store.")
             return
 
-        ids: List[str] = []
-        documents_content: List[str] = []
-        metadatas: List[Dict[str, Any]] = []
-
+        vectors_to_upsert: List[Vector] = []
         for chunk in chunks:
             if not chunk.content:
                 logger.warning(f"Chunk {chunk.id} has no content, skipping.")
                 continue
-            ids.append(chunk.id)
-            documents_content.append(chunk.content)
-            # ChromaDB metadata values must be str, int, float, or bool
-            # Pydantic models in metadata need to be converted to dicts of compatible types
-            meta_dict = chunk.metadata.model_dump(exclude_none=True)
-            # Ensure all values in meta_dict are Chroma-compatible
-            compatible_meta = {
-                k: (str(v) if not isinstance(v, (str, int, float, bool)) else v)
-                for k, v in meta_dict.items()
-            }
-            metadatas.append(compatible_meta)
+            if not chunk.embedding: # Crucial check
+                logger.error(f"Chunk {chunk.id} is missing pre-computed embedding.")
+                raise EmbeddingError(f"Chunk {chunk.id} missing embedding. Pre-compute embeddings before adding.")
 
+            metadata_payload = self._serialize_metadata(chunk.metadata)
+            # Add chunk content to metadata for potential retrieval if not storing original docs elsewhere
+            metadata_payload["text_content"] = chunk.content
 
-        if not ids:
-            logger.info("No valid chunks with content to add after filtering.")
+            vectors_to_upsert.append(
+                Vector(id=chunk.id, values=chunk.embedding, metadata=metadata_payload)
+            )
+
+        if not vectors_to_upsert:
+            logger.info("No valid chunks with embeddings to add after filtering.")
             return
 
         try:
-            logger.debug(f"Adding {len(ids)} chunks to collection '{self.collection_name}'.")
-            # ChromaDB generates embeddings internally if not provided
-            self.collection.add(
-                ids=ids,
-                documents=documents_content, # Pass raw text content for Chroma to embed
-                metadatas=metadatas,
+            logger.debug(f"Upserting {len(vectors_to_upsert)} vectors to index '{self.index_name}'.")
+            upsert_response = self.index.upsert(vectors=vectors_to_upsert)
+            logger.info(
+                f"Successfully upserted {upsert_response.upserted_count} vectors to '{self.index_name}'."
             )
-            logger.info(f"Successfully added/updated {len(ids)} chunks to '{self.collection_name}'.")
+        except ApiException as e:
+            logger.error(f"Pinecone API error during upsert: {e}", exc_info=True)
+            raise VectorStoreError(f"Pinecone API error during upsert: {e.reason}") from e
         except Exception as e:
-            logger.error(
-                f"Failed to add chunks to collection '{self.collection_name}': {e}",
-                exc_info=True,
-            )
-            raise VectorStoreError("Failed to add chunks to vector store.") from e
+            logger.error(f"Failed to upsert vectors to index '{self.index_name}': {e}", exc_info=True)
+            raise VectorStoreError("Failed to upsert vectors to Pinecone.") from e
 
     def search_similar(
         self, 
@@ -153,62 +183,69 @@ class VectorStoreService:
         top_k: int = 3, 
         filter_metadata: Optional[Dict[str, Any]] = None
     ) -> List[RetrievedChunk]:
-        """Search for chunks similar to the query embedding."""
+        """
+        Search for chunks similar to the query embedding in Pinecone.
+
+        Args:
+            query_embedding: The embedding vector for the query.
+            top_k: The number of similar results to retrieve.
+            filter_metadata: A dictionary for metadata filtering (Pinecone syntax).
+                             Example: {"genre": "drama", "year": {"$gte": 2020}}
+
+        Returns:
+            A list of RetrievedChunk objects.
+        """
+        if not query_embedding:
+            logger.warning("Search called with an empty query embedding.")
+            return []
+
         try:
-            logger.info(f"Searching for {top_k} similar chunks in collection '{self.collection_name}'.")
-            
-            results = self.collection.query(
-                query_embeddings=[query_embedding], # Must be a list of embeddings
-                n_results=top_k,
-                where=filter_metadata, # Optional metadata filter
-                include=["metadatas", "documents", "distances"], # Request distances (similarity scores)
+            logger.info(
+                f"Searching for {top_k} similar chunks in index '{self.index_name}'."
+                f"{' With filter: ' + str(filter_metadata) if filter_metadata else ''}"
             )
             
-            # ChromaDB returns distances. We need to handle different distance metrics properly.
-            # The relationship between distance and similarity depends on the distance metric:
-            # - For cosine: similarity = 1 - distance (but distance can be > 1 for very dissimilar items)
-            # - For L2/euclidean: smaller distance = higher similarity
-            # - For inner product: higher value = higher similarity
+            # Pinecone query
+            query_response = self.index.query(
+                vector=query_embedding,
+                top_k=top_k,
+                filter=filter_metadata,
+                include_metadata=True,
+                include_values=False # Usually not needed for retrieved chunks, saves bandwidth
+            )
             
             retrieved_chunks: List[RetrievedChunk] = []
-            
-            if results["ids"] and len(results["ids"][0]) > 0:
-                for i in range(len(results["ids"][0])):
-                    chunk_id = results["ids"][0][i]
-                    content = results["documents"][0][i] if results["documents"] else ""
-                    metadata_dict = results["metadatas"][0][i] if results["metadatas"] else {}
-                    distance = results["distances"][0][i] if results["distances"] else float('inf')
-                    
-                    # Convert distance to similarity score (0-1 range)
-                    # For cosine distance, similarity = 1 - distance, but clamp to [0, 1]
-                    # This handles cases where distance > 1 (very dissimilar items)
-                    if distance is not None:
-                        similarity_score = max(0.0, min(1.0, 1.0 - distance))
-                    else:
-                        similarity_score = 0.0
+            if query_response.matches:
+                for match in query_response.matches:
+                    metadata = match.metadata if match.metadata else {}
+                    # Extract original content if stored, otherwise it might be empty or from metadata
+                    content = metadata.pop("text_content", "") # Retrieve and remove from metadata to avoid duplication
                     
                     retrieved_chunk = RetrievedChunk(
-                        id=chunk_id,
-                        content=content,
-                        metadata=metadata_dict,
-                        score=similarity_score
+                        id=match.id,
+                        content=content, # Content now comes from metadata
+                        metadata=metadata, # Remaining metadata
+                        score=match.score if match.score is not None else 0.0 # Pinecone score is similarity
                     )
                     retrieved_chunks.append(retrieved_chunk)
             
             logger.info(f"Found {len(retrieved_chunks)} similar chunks.")
             return retrieved_chunks
             
+        except ApiException as e:
+            logger.error(f"Pinecone API error during search: {e}", exc_info=True)
+            raise VectorStoreError(f"Pinecone API error during search: {e.reason}") from e
         except Exception as e:
-            logger.error(f"Failed to search in collection '{self.collection_name}': {e}", exc_info=True)
-            raise VectorStoreError("Failed to search for similar chunks.") from e
+            logger.error(f"Failed to search in index '{self.index_name}': {e}", exc_info=True)
+            raise VectorStoreError("Failed to search for similar chunks in Pinecone.") from e
 
     def delete_chunks(self, chunk_ids: Optional[List[str]] = None, filter_metadata: Optional[Dict[str, Any]] = None) -> None:
         """
-        Deletes chunks from the vector store by IDs or metadata filter.
+        Deletes chunks from the Pinecone index by IDs or metadata filter.
 
         Args:
             chunk_ids: A list of chunk IDs to delete.
-            filter_metadata: A dictionary to filter chunks for deletion.
+            filter_metadata: A dictionary for metadata filtering (Pinecone syntax).
 
         Raises:
             VectorStoreError: If deletion fails.
@@ -218,139 +255,171 @@ class VectorStoreService:
             return
 
         try:
+            delete_kwargs = {}
             if chunk_ids:
-                logger.info(f"Deleting {len(chunk_ids)} chunks by ID from '{self.collection_name}'.")
-                self.collection.delete(ids=chunk_ids)
-            elif filter_metadata: # `where` in ChromaDB
-                logger.info(f"Deleting chunks by metadata filter from '{self.collection_name}': {filter_metadata}")
-                self.collection.delete(where=filter_metadata)
-            logger.info("Chunks deleted successfully.")
+                delete_kwargs["ids"] = chunk_ids
+                logger.info(f"Deleting {len(chunk_ids)} chunks by ID from '{self.index_name}'.")
+            if filter_metadata: # Pinecone uses 'filter' for delete
+                delete_kwargs["filter"] = filter_metadata
+                logger.info(f"Deleting chunks by metadata filter from '{self.index_name}': {filter_metadata}")
+
+            if not delete_kwargs: # Should not happen if initial check passes
+                return
+
+            self.index.delete(**delete_kwargs)
+            logger.info("Chunks deletion request sent to Pinecone successfully.")
+        except ApiException as e:
+            logger.error(f"Pinecone API error during delete: {e}", exc_info=True)
+            raise VectorStoreError(f"Pinecone API error during delete: {e.reason}") from e
         except Exception as e:
-            logger.error(
-                f"Failed to delete chunks from '{self.collection_name}': {e}",
-                exc_info=True,
-            )
-            raise VectorStoreError("Failed to delete chunks from vector store.") from e
+            logger.error(f"Failed to delete chunks from '{self.index_name}': {e}", exc_info=True)
+            raise VectorStoreError("Failed to delete chunks from Pinecone.") from e
 
     def get_collection_stats(self) -> Dict[str, Any]:
         """
-        Retrieves statistics about the collection.
+        Retrieves statistics about the Pinecone index.
 
         Returns:
-            A dictionary containing collection statistics (e.g., item count).
+            A dictionary containing index statistics (e.g., total vector count, dimensions).
         """
         try:
-            count = self.collection.count()
-            # name = self.collection.name # Already known
-            # metadata = self.collection.metadata # If any was set
-            stats = {"item_count": count, "collection_name": self.collection_name}
-            logger.debug(f"Collection '{self.collection_name}' stats: {stats}")
-            return stats
+            stats = self.index.describe_index_stats()
+            # Convert Pinecone's DescribeIndexStatsResponse to a dict for consistent return type
+            # Example: stats.total_vector_count, stats.dimension, stats.namespaces
+            logger.debug(f"Pinecone index '{self.index_name}' stats: {stats}")
+            return {
+                "item_count": stats.total_vector_count or 0,
+                "dimension": stats.dimension or 0,
+                "namespaces": stats.namespaces or {}, # Provides counts per namespace
+                "index_fullness": stats.index_fullness or 0.0, # If available
+                "index_name": self.index_name,
+            }
+        except ApiException as e:
+            logger.error(f"Pinecone API error during describe_index_stats: {e}", exc_info=True)
+            raise VectorStoreError(f"Pinecone API error retrieving stats: {e.reason}") from e
         except Exception as e:
-            logger.error(
-                f"Failed to get stats for collection '{self.collection_name}': {e}",
-                exc_info=True,
-            )
-            raise VectorStoreError("Failed to retrieve collection statistics.") from e
+            logger.error(f"Failed to get stats for index '{self.index_name}': {e}", exc_info=True)
+            raise VectorStoreError("Failed to retrieve Pinecone index statistics.") from e
 
-    def clear_collection(self) -> None:
+    def clear_collection(self, namespace: Optional[str] = None) -> None:
         """
-        Deletes all items from the collection.
+        Deletes all vectors from the Pinecone index or a specific namespace.
         This is a destructive operation.
+
+        Args:
+            namespace: If provided, deletes all vectors in this namespace.
+                       If None, deletes all vectors in the entire index.
         """
         try:
-            current_count = self.collection.count()
-            if current_count == 0:
-                logger.info(f"Collection '{self.collection_name}' is already empty. No items to clear.")
-                return
-
+            action = f"namespace '{namespace}'" if namespace else "entire index"
             logger.warning(
-                f"Clearing all {current_count} items from collection '{self.collection_name}'. "
+                f"Clearing all vectors from {action} in index '{self.index_name}'. "
                 "This operation is destructive."
             )
-            # To delete all items, one way is to get all IDs and delete them.
-            # Or, delete and recreate the collection (more robust for full clear).
-            self.client.delete_collection(name=self.collection_name)
-            logger.info(f"Collection '{self.collection_name}' deleted.")
-            # Recreate it with the same embedding function
-            chroma_ef = None
-            if self._embedding_service and self._embedding_service.model_name:
-                 chroma_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-                    model_name=self._embedding_service.model_name,
-                    device=self._embedding_service.device or "cpu"
-                )
-            else:
-                settings = get_settings()
-                default_ef_model = settings.EMBEDDING_MODEL_NAME
-                chroma_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-                    model_name=default_ef_model,
-                    device=settings.EMBEDDING_MODEL_DEVICE or "cpu"
-                )
 
-            self.collection = self.client.get_or_create_collection(
-                name=self.collection_name,
-                embedding_function=chroma_ef
-            )
-            logger.info(f"Collection '{self.collection_name}' recreated and is now empty.")
+            delete_kwargs = {"delete_all": True}
+            if namespace:
+                delete_kwargs["namespace"] = namespace
 
+            self.index.delete(**delete_kwargs)
+            logger.info(f"Successfully cleared all vectors from {action} in index '{self.index_name}'.")
+
+        except ApiException as e:
+            logger.error(f"Pinecone API error during clear_collection (delete all): {e}", exc_info=True)
+            raise VectorStoreError(f"Pinecone API error clearing collection: {e.reason}") from e
         except Exception as e:
-            logger.error(
-                f"Failed to clear collection '{self.collection_name}': {e}",
-                exc_info=True,
-            )
-            raise VectorStoreError(f"Failed to clear collection '{self.collection_name}'.") from e
+            logger.error(f"Failed to clear index '{self.index_name}': {e}", exc_info=True)
+            raise VectorStoreError(f"Failed to clear Pinecone index '{self.index_name}'.") from e
 
 
-# Example Usage:
+# Example Usage (Simplified and adapted for Pinecone, assuming env vars are set for API key etc.):
+# Note: This example would require DocumentChunk to have an `embedding` field.
+# And Pinecone index must exist and be configured.
 if __name__ == "__main__":
     from rag_system.config.logging_config import setup_logging
     setup_logging("DEBUG")
 
-    # Create dummy settings for example
-    class MockSettings(AppSettings):
-        VECTOR_STORE_PATH: str = "./data/test_chroma_store" # Use a test-specific path
-        CHROMA_COLLECTION_NAME: str = "test_collection"
-        EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2" # Ensure this is consistent
+    # Ensure PINECONE_API_KEY, PINECONE_ENVIRONMENT, PINECONE_INDEX_NAME are in .env or environment
+    # For this example, we assume they are.
+    # Also, the DocumentChunk model would need `embedding: List[float]` field.
 
-    test_settings = MockSettings()
-    Path(test_settings.VECTOR_STORE_PATH).mkdir(parents=True, exist_ok=True)
+    logger.info("Starting Pinecone VectorStoreService example...")
+
+    # Create dummy settings, relying on .env for Pinecone specifics
+    # For a real test, you'd mock AppSettings or ensure .env is correctly set up.
+    class MockPineconeSettings(AppSettings):
+        VECTOR_STORE_PROVIDER: str = "pinecone"
+        # PINECONE_API_KEY, PINECONE_ENVIRONMENT, PINECONE_INDEX_NAME loaded from .env
+        # EMBEDDING_MODEL_NAME required by EmbeddingService
+        EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
+        # Ensure the dummy DocumentChunk below has an embedding of the correct dimension for this model (384)
+
+    test_settings = None
+    try:
+        test_settings = MockPineconeSettings()
+    except Exception as e:
+        logger.warning(f"Could not load MockPineconeSettings (likely missing .env for Pinecone): {e}")
+        logger.warning("Skipping Pinecone example execution. Ensure Pinecone env vars are set.")
+        exit()
+
+
+    if not all([test_settings.PINECONE_API_KEY, test_settings.PINECONE_ENVIRONMENT, test_settings.PINECONE_INDEX_NAME]):
+        logger.warning("Pinecone credentials or index name not found in settings/env. Skipping example.")
+        exit()
+
+    embed_service = None
+    vector_store = None
 
     try:
-        # Initialize services
         embed_service = EmbeddingService(settings=test_settings)
         vector_store = VectorStoreService(settings=test_settings, embedding_service=embed_service)
 
-        # Clear collection for a fresh start in example
-        logger.info(f"Attempting to clear collection '{vector_store.collection_name}' for test run.")
-        vector_store.clear_collection()
-        logger.info(f"Initial collection stats: {vector_store.get_collection_stats()}")
+        logger.info(f"Initial index stats: {vector_store.get_collection_stats()}")
+
+        # Example: Clear a specific namespace or the whole index before running tests
+        # vector_store.clear_collection() # Be careful with this!
+        # logger.info(f"Index stats after clearing: {vector_store.get_collection_stats()}")
+
+        # Create sample chunks with embeddings
+        # Dimension for all-MiniLM-L6-v2 is 384
+        dummy_embedding_dim = embed_service.get_embedding_dimension()
+        if not dummy_embedding_dim: # Should be set by EmbeddingService
+             dummy_embedding_dim = 384
+             logger.warning(f"Could not get embedding dimension, defaulting to {dummy_embedding_dim}")
 
 
-        # Create sample chunks
         sample_chunks_data = [
-            ("id1", "This is the first document about apples.", {"source": "docA", "type": "fruit"}),
-            ("id2", "The second document discusses bananas.", {"source": "docB", "type": "fruit"}),
-            ("id3", "Oranges are also a popular citrus fruit.", {"source": "docC", "type": "fruit"}),
-            ("id4", "A document about cars and engines.", {"source": "docD", "type": "vehicle"}),
+            ("pc_id1", "First Pinecone doc about apples.", {"source": "docPineA", "type": "fruit"}, [0.1] * dummy_embedding_dim),
+            ("pc_id2", "Second Pinecone doc about bananas.", {"source": "docPineB", "type": "fruit"}, [0.2] * dummy_embedding_dim),
+            ("pc_id3", "Pinecone oranges are citrus.", {"source": "docPineC", "type": "fruit"}, [0.3] * dummy_embedding_dim),
+            ("pc_id4", "Pinecone document about cars.", {"source": "docPineD", "type": "vehicle"}, [0.4] * dummy_embedding_dim),
         ]
+
+        # This part requires DocumentChunk to have an `embedding` field.
+        # Let's assume it does for this example.
         chunks_to_add: List[DocumentChunk] = []
-        for id_val, content_val, meta_val in sample_chunks_data:
+        for id_val, content_val, meta_val, emb_val in sample_chunks_data:
             doc_meta = DocumentMetadata(
                 source_id=meta_val["source"],
                 filename=f"{meta_val['source']}.txt",
-                custom_fields=meta_val # Store additional fields
+                custom_fields=meta_val
             )
-            chunks_to_add.append(
-                DocumentChunk(id=id_val, document_id=meta_val["source"], content=content_val, metadata=doc_meta)
-            )
+            # Assuming DocumentChunk now has an embedding field
+            # Modify DocumentChunk in schemas.py: embedding: Optional[List[float]] = None
+            chunk = DocumentChunk(id=id_val, document_id=meta_val["source"], content=content_val, metadata=doc_meta)
+            chunk.embedding = emb_val # Assign the embedding
+            chunks_to_add.append(chunk)
 
-        # Add chunks
-        vector_store.add_chunks(chunks_to_add)
-        logger.info(f"Collection stats after adding chunks: {vector_store.get_collection_stats()}")
+
+        if chunks_to_add:
+             vector_store.add_chunks(chunks_to_add)
+             logger.info(f"Index stats after adding chunks: {vector_store.get_collection_stats()}")
 
         # Search for similar chunks
-        query_text = "Tell me about fruits"
-        query_embedding = embed_service.encode_query(query_text)
+        query_text = "Tell me about fruits with Pinecone"
+        # Actual embedding generation should be robust
+        query_embedding = embed_service.encode_queries([query_text])[0]
+
 
         if query_embedding:
             similar_chunks = vector_store.search_similar(query_embedding, top_k=2)
@@ -359,34 +428,33 @@ if __name__ == "__main__":
                 logger.info(f"Result {i+1}: ID={r_chunk.id}, Score={r_chunk.score:.4f}, Content='{r_chunk.content[:50]}...'")
                 logger.info(f"   Metadata: {r_chunk.metadata}")
 
-            # Search with metadata filter
+            # Example filter (syntax depends on how metadata was stored)
+            # Pinecone filter syntax: {"field_name": "field_value"}
+            # If custom_fields were stored as custom_type: "vehicle"
             filtered_chunks = vector_store.search_similar(
-                query_embedding, top_k=2, filter_metadata={"type": "vehicle"} # Chroma syntax for where
+                 query_embedding, top_k=2, filter_metadata={"custom_type": "vehicle"}
             )
-            logger.info(f"Found {len(filtered_chunks)} similar chunks with filter {{'type': 'vehicle'}}:")
+            logger.info(f"Found {len(filtered_chunks)} similar chunks with filter {{'custom_type': 'vehicle'}}:")
             for i, r_chunk in enumerate(filtered_chunks):
                 logger.info(f"Filtered Result {i+1}: ID={r_chunk.id}, Score={r_chunk.score:.4f}, Content='{r_chunk.content[:50]}...'")
         else:
             logger.error("Could not generate query embedding for search.")
 
-
         # Delete a chunk
-        vector_store.delete_chunks(chunk_ids=["id1"])
-        logger.info(f"Collection stats after deleting 'id1': {vector_store.get_collection_stats()}")
+        if chunks_to_add:
+            vector_store.delete_chunks(chunk_ids=[chunks_to_add[0].id])
+            logger.info(f"Index stats after deleting '{chunks_to_add[0].id}': {vector_store.get_collection_stats()}")
 
-        # Delete by metadata
-        vector_store.delete_chunks(filter_metadata={"type": "fruit"})
-        logger.info(f"Collection stats after deleting fruit type: {vector_store.get_collection_stats()}")
+            # Delete by metadata filter
+            # vector_store.delete_chunks(filter_metadata={"custom_type": "fruit"})
+            # logger.info(f"Index stats after deleting fruit type (via filter): {vector_store.get_collection_stats()}")
 
 
     except (VectorStoreError, EmbeddingError) as e:
-        logger.error(f"Vector store or embedding service error: {e}")
+        logger.error(f"Vector store or embedding service error: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}", exc_info=True)
+        logger.error(f"An unexpected error occurred in Pinecone example: {e}", exc_info=True)
     finally:
-        # Clean up test directory (optional)
-        # import shutil
-        # if Path(test_settings.VECTOR_STORE_PATH).exists():
-        #     shutil.rmtree(test_settings.VECTOR_STORE_PATH)
-        #     logger.info(f"Cleaned up test vector store: {test_settings.VECTOR_STORE_PATH}")
+        logger.info("Pinecone VectorStoreService example finished.")
+        # No local cleanup like rmtree needed for Pinecone (cloud service)
         pass

@@ -1,0 +1,290 @@
+/* Basic Reset & Font */
+body, html {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    line-height: 1.6;
+    background-color: #f0f2f5; /* Light grey background for contrast with white content areas */
+    color: #333;
+}
+
+*, *:before, *:after {
+    box-sizing: inherit;
+}
+
+/* Container and Content Centering */
+.container { /* This class isn't explicitly used in HTML but good to have */
+    width: 90%;
+    max-width: 1000px; /* Max width for content area */
+    margin: 0 auto; /* Center container */
+    padding: 20px;
+}
+
+header {
+    background: #2c3e50; /* Darker, more modern blue */
+    color: #ecf0f1; /* Light text color */
+    padding: 1.5rem 0;
+    text-align: center;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+header h1 {
+    margin: 0;
+    font-size: 2rem; /* Slightly larger */
+    padding-bottom: 0.5rem;
+}
+
+/* Navigation Bar */
+nav {
+    display: flex;
+    justify-content: center;
+    background: #34495e; /* Slightly lighter than header for depth */
+    padding: 0.75rem 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+nav a {
+    color: #ecf0f1;
+    padding: 0.75rem 1.5rem; /* More padding */
+    text-decoration: none;
+    font-weight: 500; /* Slightly bolder */
+    transition: background-color 0.3s ease, color 0.3s ease; /* Smooth transition */
+}
+
+nav a.active, nav a:hover {
+    background: #1abc9c; /* Teal accent for active/hover */
+    color: #fff;
+    border-radius: 4px; /* Subtle rounding */
+}
+
+/* Main Content Area */
+main {
+    display: block; /* Ensure main is block */
+    max-width: 1000px;
+    margin: 20px auto; /* Centered with space from header/footer */
+    padding: 20px;
+    background: #fff;
+    border-radius: 8px; /* Rounded corners for content area */
+    box-shadow: 0 0 15px rgba(0,0,0,0.07); /* Softer shadow */
+}
+
+section {
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    border-radius: 6px; /* Consistent rounding */
+    /* border: 1px solid #e0e0e0; Optional border for sections */
+}
+
+section h2 {
+    margin-top: 0;
+    color: #2c3e50; /* Consistent header color */
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid #1abc9c; /* Accent border */
+    display: inline-block; /* So border only spans text width */
+}
+
+/* Forms: Textarea and Input Fields */
+textarea, input[type="text"] {
+    width: 100%; /* Full width */
+    padding: 12px 15px; /* More padding */
+    margin-bottom: 15px; /* More space below */
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 1rem;
+    line-height: 1.5;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+textarea:focus, input[type="text"]:focus {
+    border-color: #1abc9c; /* Teal focus border */
+    box-shadow: 0 0 0 0.2rem rgba(26, 188, 156, 0.25); /* Teal focus shadow */
+    outline: none;
+}
+
+textarea {
+    min-height: 120px;
+    resize: vertical; /* Allow vertical resize */
+}
+
+/* Buttons */
+button {
+    display: inline-block;
+    background: #3498db; /* Primary button blue */
+    color: #fff;
+    border: none;
+    padding: 12px 25px; /* More padding */
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 1rem;
+    font-weight: 500;
+    transition: background-color 0.3s ease, transform 0.1s ease;
+    box-shadow: 0 2px 3px rgba(0,0,0,0.1);
+}
+
+button:hover {
+    background: #2980b9; /* Darker blue on hover */
+    transform: translateY(-1px); /* Slight lift on hover */
+}
+
+button:active {
+    transform: translateY(0px); /* Button press effect */
+    box-shadow: 0 1px 1px rgba(0,0,0,0.1);
+}
+
+/* Query Results & Retrieved Chunks */
+#query-results h3, #query-results h4 {
+    color: #2c3e50;
+}
+#query-results .llm-answer {
+    background-color: #eaf6ff; /* Light blue background for answer */
+    padding: 15px;
+    border-radius: 4px;
+    margin-bottom: 20px;
+    border-left: 5px solid #3498db;
+}
+#query-results .debug-info {
+    font-size: 0.8em;
+    color: #777;
+    margin-bottom: 20px;
+}
+
+.chunk {
+    background: #f9f9f9; /* Lighter background for chunks */
+    border: 1px solid #e0e0e0;
+    padding: 15px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.chunk p {
+    margin: 0.5rem 0;
+}
+.chunk strong {
+    color: #333;
+}
+.chunk em { /* For score and source */
+    color: #555;
+    font-size: 0.9em;
+}
+.chunk .metadata {
+    font-style: italic;
+    font-size: 0.85em;
+    color: #666;
+}
+.chunk .metadata-full { /* Optional full metadata display */
+    background-color: #eee;
+    padding: 5px;
+    font-size: 0.75em;
+    white-space: pre-wrap; /* Preserve formatting */
+    max-height: 100px;
+    overflow-y: auto;
+}
+
+
+/* System Status Page */
+#status-details .status-overall {
+    font-size: 1.2em;
+    margin-bottom: 1em;
+}
+#status-details .status-overall .status-ok { color: #27ae60; font-weight: bold; } /* Green */
+#status-details .status-overall .status-degraded { color: #f39c12; font-weight: bold; } /* Orange */
+#status-details .status-overall .status-error { color: #e74c3c; font-weight: bold; } /* Red */
+#status-details .status-overall .status-unknown { color: #7f8c8d; font-weight: bold; } /* Grey */
+
+.component-status {
+    background-color: #f9f9f9;
+    border: 1px solid #e0e0e0;
+    padding: 15px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+}
+.component-status p { margin: 0.3rem 0; }
+.component-status .status-ok { color: #27ae60; }
+.component-status .status-degraded { color: #f39c12; }
+.component-status .status-error { color: #e74c3c; }
+.component-status .status-unknown { color: #7f8c8d; }
+
+.component-message { font-style: italic; color: #555; }
+.component-details {
+    background-color: #eef;
+    padding: 8px;
+    border-radius: 3px;
+    font-size: 0.85em;
+    white-space: pre-wrap;
+    max-height: 150px;
+    overflow-y: auto;
+    border: 1px solid #ddf;
+}
+
+
+/* Footer */
+footer {
+    text-align: center;
+    padding: 1.5rem;
+    background: #2c3e50; /* Consistent with header */
+    color: #ecf0f1;
+    margin-top: 2rem;
+    font-size: 0.9em;
+}
+
+/* Loader Style */
+.loader {
+    text-align: center;
+    padding: 30px 20px; /* More padding */
+    font-style: italic;
+    color: #555;
+    font-size: 1.1em; /* Slightly larger */
+    border: 1px dashed #ccc; /* Optional border */
+    border-radius: 4px;
+    background-color: #f9f9f9;
+}
+
+/* Basic Responsiveness */
+@media (max-width: 768px) {
+    .container, main {
+        width: 95%;
+        padding: 15px;
+    }
+
+    nav {
+        flex-direction: column; /* Stack nav links */
+        padding: 0;
+    }
+
+    nav a {
+        padding: 0.8rem 1rem;
+        text-align: center;
+        border-bottom: 1px solid #4a6278; /* Separator for stacked links */
+    }
+    nav a:last-child {
+        border-bottom: none;
+    }
+    nav a.active, nav a:hover {
+        border-radius: 0; /* Full width active/hover */
+    }
+
+    header h1 {
+        font-size: 1.8rem;
+    }
+    section h2 {
+        font-size: 1.3rem;
+    }
+
+    textarea, input[type="text"], button {
+        font-size: 0.95rem; /* Adjust font size for smaller screens */
+        padding: 10px 12px;
+    }
+    button {
+        padding: 10px 20px;
+    }
+}
+
+@media (max-width: 480px) {
+    header h1 {
+        font-size: 1.5rem;
+    }
+    nav a {
+        padding: 0.7rem 1rem;
+    }
+}

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ingest Documents - RAG App</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>RAG System</h1>
+        <nav>
+            <a href="index.html">Query</a>
+            <a href="ingest.html" class="active">Ingest Documents</a>
+            <a href="status.html">System Status</a>
+        </nav>
+    </header>
+    <main>
+        <section id="ingest-section">
+            <h2>Ingest New Documents</h2>
+            <p>Select one or more document files (e.g., .txt, .md) to upload and process into the RAG system.</p>
+            <input type="file" id="file-input" multiple>
+            <button id="start-ingestion">Start Ingestion</button>
+            <div id="ingestion-status">
+                <!-- Ingestion status will be displayed here -->
+            </div>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2024 RAG Application</p>
+    </footer>
+    <script src="js/api.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

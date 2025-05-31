@@ -135,18 +135,42 @@ class RAGService:
                 logger.error(f"Error processing/chunking documents: {e}", exc_info=True)
                 raise DocumentProcessingError(message="Failed during text processing and chunking.", detail=str(e)) from e
 
-            # 3. Generate embeddings (if VectorStoreService doesn't do it internally)
-            # ChromaDB with SentenceTransformerEmbeddingFunction handles embedding internally.
-            # If we were to use a vector store that requires pre-computed embeddings:
-            # try:
-            #     if document_chunks:
-            #         chunk_contents = [chunk.content for chunk in document_chunks]
-            #         embeddings = self.embedding_service.encode_texts(chunk_contents)
-            #         for i, chunk in enumerate(document_chunks):
-            #             chunk.embedding = embeddings[i]
-            # except EmbeddingError as e:
-            #     logger.error(f"Error generating embeddings: {e.message}", exc_info=True)
-            #     raise # Re-raise to be caught by the outer try-except
+            # 3. Generate embeddings for chunks (required by Pinecone)
+            if document_chunks:
+                try:
+                    logger.info(f"Generating embeddings for {len(document_chunks)} document chunks.")
+                    chunk_contents = [chunk.content for chunk in document_chunks]
+                    embeddings = self.embedding_service.encode_texts(chunk_contents)
+                    if len(embeddings) != len(document_chunks):
+                        # This should ideally not happen if encode_texts is robust
+                        logger.error(
+                            f"Mismatch in number of chunks ({len(document_chunks)}) "
+                            f"and generated embeddings ({len(embeddings)})."
+                        )
+                        raise EmbeddingError(
+                            message="Embedding generation returned a mismatched number of embeddings.",
+                            detail=f"Expected {len(document_chunks)}, got {len(embeddings)}"
+                        )
+                    for i, chunk in enumerate(document_chunks):
+                        chunk.embedding = embeddings[i]
+                    logger.info(f"Successfully generated and assigned embeddings to {len(document_chunks)} chunks.")
+                except EmbeddingError as e:
+                    logger.error(f"Error generating embeddings: {e.message}", exc_info=True)
+                    # Propagate this error to the main try-except block for IngestionResponse
+                    raise DocumentProcessingError(
+                        message="Failed during embedding generation phase.",
+                        detail=str(e),
+                        error_type="EmbeddingError" # Custom attribute for clarity
+                    ) from e
+                except Exception as e: # Catch any other unexpected error from embedding service
+                    logger.error(f"Unexpected error during embedding generation: {e}", exc_info=True)
+                    raise DocumentProcessingError(
+                        message="Unexpected error during embedding generation.",
+                        detail=str(e),
+                        error_type="EmbeddingGenerationError"
+                    ) from e
+            else:
+                logger.info("No document chunks to generate embeddings for.")
 
             # 4. Add chunks to vector store
             try:

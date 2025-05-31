@@ -87,8 +87,14 @@ class AppSettings(BaseSettings):
     # =============================================================================
     # VECTOR STORE CONFIGURATION
     # =============================================================================
-    VECTOR_STORE_PATH: str = Field(default="./data/vector_store", description="Vector store data path")
+    VECTOR_STORE_PROVIDER: str = Field(default="chromadb", description="Vector store provider: 'chromadb' or 'pinecone'")
+    VECTOR_STORE_PATH: str = Field(default="./data/vector_store", description="Vector store data path (for ChromaDB)")
     CHROMA_COLLECTION_NAME: str = Field(default="rag_documents_v1", description="ChromaDB collection name")
+
+    # Pinecone Configuration (optional, only if VECTOR_STORE_PROVIDER is 'pinecone')
+    PINECONE_API_KEY: Optional[SecretStr] = Field(default=None, description="Pinecone API key")
+    PINECONE_ENVIRONMENT: Optional[str] = Field(default=None, description="Pinecone environment (e.g., 'us-west1-gcp')")
+    PINECONE_INDEX_NAME: Optional[str] = Field(default=None, description="Pinecone index name")
 
     # Embedding Configuration
     EMBEDDING_MODEL_NAME: str = Field(
@@ -164,6 +170,16 @@ class AppSettings(BaseSettings):
         valid_providers = {'openai', 'anthropic', 'gemini'}
         if v.lower() not in valid_providers:
             raise ValueError(f"DEFAULT_LLM_PROVIDER must be one of: {valid_providers}")
+        return v.lower()
+
+    @field_validator('VECTOR_STORE_PROVIDER')
+    @classmethod
+    def validate_vector_store_provider(cls, v: str) -> str:
+        # Clean up the value first
+        v = v.strip().strip('"\'').split('#')[0].strip()
+        valid_providers = {'chromadb', 'pinecone'}
+        if v.lower() not in valid_providers:
+            raise ValueError(f"VECTOR_STORE_PROVIDER must be one of: {valid_providers}")
         return v.lower()
 
     @field_validator('EMBEDDING_MODEL_DEVICE')
@@ -277,7 +293,13 @@ def get_settings() -> AppSettings:
             environment=settings.ENVIRONMENT,
             app_name=settings.APP_NAME,
             configured_providers=settings.configured_llm_providers,
+            vector_store_provider=settings.VECTOR_STORE_PROVIDER,
         )
+        if settings.VECTOR_STORE_PROVIDER == 'pinecone':
+            if settings.PINECONE_INDEX_NAME:
+                logger.info("Pinecone index name", index_name=settings.PINECONE_INDEX_NAME)
+            else:
+                logger.warning("Pinecone is selected as vector store, but PINECONE_INDEX_NAME is not set.")
         return settings
     except Exception as e:
         logger.error("Failed to load settings", error=str(e))
