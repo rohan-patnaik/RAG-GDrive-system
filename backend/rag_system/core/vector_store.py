@@ -4,7 +4,9 @@ import json # For serializing metadata if necessary
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path # For example usage if kept
 
-from pinecone import Pinecone, Index, ApiException
+from pinecone import Pinecone, Index # Keep these if they are still valid
+from pinecone.exceptions import PineconeApiException
+
 from pinecone.core.client.models import Vector
 
 from rag_system.models.schemas import DocumentChunk, DocumentMetadata, RetrievedChunk
