@@ -253,8 +253,7 @@ class LLMService:
             #     # This part needs to be defined based on how local LLM health is determined
             #     pass
 
-            if provider != LLMProvider.LOCAL and \
-               (api_key is None or len(api_key.get_secret_value().strip()) == 0):
+            if provider != LLMProvider.LOCAL and (api_key is None or len(api_key.get_secret_value().strip()) == 0):
                 status.status = StatusEnum.DEGRADED
                 status.message = f"API key not configured for {provider.value} (checked {api_key_name})"
                 status.details = {"configured": False, "reason": "missing_api_key"}
