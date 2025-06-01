@@ -167,3 +167,6 @@ sentence_transformers_cache/
 
 # Streamlit
 .streamlit/
+
+# Local Netlify folder
+.netlify

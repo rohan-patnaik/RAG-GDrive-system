@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG-GDrive System</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>RAG Document Query System</h1>
+            <div id="rate-limit-info" class="rate-limit-info"></div>
+        </header>
+
+        <main>
+            <section class="auth-section">
+                <h2>Authentication</h2>
+                <div class="form-group">
+                    <label for="api-key">API Key:</label>
+                    <input type="password" id="api-key" placeholder="Enter your API key">
+                    <button onclick="authManager.saveApiKey()">Save Key</button>
+                </div>
+            </section>
+
+            <section class="query-section">
+                <h2>Query Documents</h2>
+                <form id="query-form" class="api-form">
+                    <div class="form-group">
+                        <label for="query-text">Question:</label>
+                        <textarea id="query-text" placeholder="Ask a question about your documents..." rows="3"></textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="llm-provider">LLM Provider:</label>
+                        <select id="llm-provider">
+                            <option value="openai">OpenAI GPT</option>
+                            <option value="anthropic">Anthropic Claude</option>
+                            <option value="google">Google Gemini</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="use-cache" checked>
+                            Use cache for faster responses
+                        </label>
+                    </div>
+                    
+                    <button type="submit">Ask Question</button>
+                </form>
+
+                <div id="query-results" class="results"></div>
+            </section>
+
+            <section class="upload-section">
+                <h2>Upload Documents</h2>
+                <form id="upload-form" class="api-form">
+                    <div class="form-group">
+                        <label for="files">Select Files:</label>
+                        <input type="file" id="files" multiple accept=".txt,.pdf,.docx">
+                        <small>Supported formats: TXT, PDF, DOCX</small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="source">Source (optional):</label>
+                        <input type="text" id="source" placeholder="e.g., Company Handbook, Research Papers">
+                    </div>
+                    
+                    <button type="submit">Upload Documents</button>
+                </form>
+
+                <div id="upload-results" class="results"></div>
+            </section>
+
+            <section class="status-section">
+                <h2>System Status</h2>
+                <button onclick="checkSystemStatus()">Check Status</button>
+                <div id="status-results" class="results"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="js/auth.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

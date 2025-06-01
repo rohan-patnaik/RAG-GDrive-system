@@ -4,6 +4,7 @@ uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
 python-dotenv==1.0.0
+requests==2.31.0
 
 # Vector Store & Embeddings
 chromadb==0.4.17
@@ -39,3 +40,10 @@ mypy==1.7.1
 
 # Streamlit (Optional)
 streamlit==1.28.0
+
+# Document processing (optional)
+PyPDF2==3.0.1
+python-docx==0.8.11
+
+# Additional utilities
+python-multipart==0.0.6
