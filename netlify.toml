@@ -7,7 +7,8 @@
   PYTHON_VERSION = "3.9"
 
 [functions]
-  python_runtime = "python3.9"
+  # Python functions configuration
+  external_node_modules = []
 
 [[redirects]]
   from = "/api/health"
