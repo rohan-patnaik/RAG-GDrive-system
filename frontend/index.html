@@ -14,69 +14,174 @@
         </header>
 
         <main>
+            <!-- API Key Setup Section -->
             <section class="auth-section">
-                <h2>Authentication</h2>
+                <h2>🔑 User Authentication</h2>
+                <div class="api-key-explanation">
+                    <div class="info-box">
+                        <h3>What API key do I need?</h3>
+                        <p><strong>You need a RAG System API Key</strong> to use this application.</p>
+                        <ul>
+                            <li>✅ <strong>RAG System API Key:</strong> Ask the system administrator for your personal access key</li>
+                            <li>❌ <strong>NOT your OpenAI/Pinecone keys:</strong> Those are configured by the admin in the backend</li>
+                        </ul>
+                    </div>
+                </div>
+                
                 <div class="form-group">
-                    <label for="api-key">API Key:</label>
-                    <input type="password" id="api-key" placeholder="Enter your API key">
+                    <label for="api-key">🔐 Your RAG System API Key:</label>
+                    <div class="input-with-help">
+                        <input type="password" id="api-key" placeholder="Enter your RAG system access key (not OpenAI/Pinecone)">
+                        <small class="help-text">This is your personal key to access this RAG system, not your OpenAI or other service keys</small>
+                    </div>
                     <button onclick="authManager.saveApiKey()">Save Key</button>
                 </div>
+
+                <!-- API Key Status -->
+                <div id="auth-status" class="auth-status"></div>
             </section>
 
+            <!-- Admin Setup Instructions (Collapsible) -->
+            <section class="admin-section">
+                <details>
+                    <summary>📋 For System Administrators: Backend API Keys Setup</summary>
+                    <div class="admin-content">
+                        <h3>Environment Variables to Set in Netlify Dashboard:</h3>
+                        <div class="env-vars">
+                            <div class="env-group">
+                                <h4>🤖 LLM Services (Required)</h4>
+                                <code>OPENAI_API_KEY=sk-...</code> - Get from <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI Platform</a><br>
+                                <code>ANTHROPIC_API_KEY=sk-ant-...</code> - Get from <a href="https://console.anthropic.com/" target="_blank">Anthropic Console</a> (optional)<br>
+                                <code>GOOGLE_API_KEY=AI...</code> - Get from <a href="https://aistudio.google.com/app/apikey" target="_blank">Google AI Studio</a> (optional)
+                            </div>
+                            
+                            <div class="env-group">
+                                <h4>🗄️ Vector Database (Required)</h4>
+                                <code>PINECONE_API_KEY=...</code> - Get from <a href="https://pinecone.io" target="_blank">Pinecone Console</a><br>
+                                <code>PINECONE_INDEX_NAME=rag-documents</code><br>
+                                <code>PINECONE_ENVIRONMENT=us-east-1</code>
+                            </div>
+                            
+                            <div class="env-group">
+                                <h4>🔐 User Authentication (Required)</h4>
+                                <code>API_KEY=your-chosen-user-access-key</code> - Create a secure key for users<br>
+                                <code>SECRET_KEY=your-secret-signing-key</code> - Create a secure signing key
+                            </div>
+                            
+                            <div class="env-group">
+                                <h4>⚙️ Optional Configuration</h4>
+                                <code>DEFAULT_LLM_PROVIDER=openai</code><br>
+                                <code>ENABLE_CACHING=true</code><br>
+                                <code>ENABLE_RATE_LIMITING=true</code>
+                            </div>
+                        </div>
+                        
+                        <div class="setup-steps">
+                            <h3>Setup Steps:</h3>
+                            <ol>
+                                <li>Create accounts and get API keys from the services above</li>
+                                <li>Set all environment variables in Netlify Dashboard → Site Settings → Environment Variables</li>
+                                <li>Create a secure user API key and share it with users</li>
+                                <li>Deploy the application</li>
+                            </ol>
+                        </div>
+                    </div>
+                </details>
+            </section>
+
+            <!-- Query Section -->
             <section class="query-section">
-                <h2>Query Documents</h2>
+                <h2>💬 Query Documents</h2>
                 <form id="query-form" class="api-form">
                     <div class="form-group">
-                        <label for="query-text">Question:</label>
+                        <label for="query-text">❓ Your Question:</label>
                         <textarea id="query-text" placeholder="Ask a question about your documents..." rows="3"></textarea>
                     </div>
                     
                     <div class="form-group">
-                        <label for="llm-provider">LLM Provider:</label>
+                        <label for="llm-provider">🤖 AI Model:</label>
                         <select id="llm-provider">
-                            <option value="openai">OpenAI GPT</option>
+                            <option value="openai">OpenAI GPT-3.5/4</option>
                             <option value="anthropic">Anthropic Claude</option>
                             <option value="google">Google Gemini</option>
                         </select>
+                        <small class="help-text">Choose which AI model to generate the answer</small>
                     </div>
                     
                     <div class="form-group">
                         <label>
                             <input type="checkbox" id="use-cache" checked>
-                            Use cache for faster responses
+                            ⚡ Use cache for faster responses
                         </label>
                     </div>
                     
-                    <button type="submit">Ask Question</button>
+                    <button type="submit">🔍 Ask Question</button>
                 </form>
 
                 <div id="query-results" class="results"></div>
             </section>
 
+            <!-- Upload Section -->
             <section class="upload-section">
-                <h2>Upload Documents</h2>
+                <h2>📄 Upload Documents</h2>
                 <form id="upload-form" class="api-form">
                     <div class="form-group">
-                        <label for="files">Select Files:</label>
+                        <label for="files">📁 Select Files:</label>
                         <input type="file" id="files" multiple accept=".txt,.pdf,.docx">
-                        <small>Supported formats: TXT, PDF, DOCX</small>
+                        <small class="help-text">Supported formats: TXT, PDF, DOCX (max 10MB each)</small>
                     </div>
                     
                     <div class="form-group">
-                        <label for="source">Source (optional):</label>
-                        <input type="text" id="source" placeholder="e.g., Company Handbook, Research Papers">
+                        <label for="source">🏷️ Source Category (optional):</label>
+                        <input type="text" id="source" placeholder="e.g., Company Handbook, Research Papers, User Manual">
+                        <small class="help-text">Help categorize your documents for better organization</small>
                     </div>
                     
-                    <button type="submit">Upload Documents</button>
+                    <button type="submit">⬆️ Upload Documents</button>
                 </form>
 
                 <div id="upload-results" class="results"></div>
             </section>
 
+            <!-- System Status Section -->
             <section class="status-section">
-                <h2>System Status</h2>
-                <button onclick="checkSystemStatus()">Check Status</button>
+                <h2>🩺 System Status</h2>
+                <button onclick="checkSystemStatus()">🔍 Check Status</button>
                 <div id="status-results" class="results"></div>
+            </section>
+
+            <!-- Help Section -->
+            <section class="help-section">
+                <details>
+                    <summary>❓ Help & FAQ</summary>
+                    <div class="help-content">
+                        <h3>How to Use This System:</h3>
+                        <ol>
+                            <li><strong>Get your API key:</strong> Ask the system administrator for your personal RAG system API key</li>
+                            <li><strong>Enter your key:</strong> Paste it in the "User Authentication" section above</li>
+                            <li><strong>Upload documents:</strong> Add your documents (PDF, Word, or text files)</li>
+                            <li><strong>Ask questions:</strong> Query your documents using natural language</li>
+                        </ol>
+
+                        <h3>Common Issues:</h3>
+                        <div class="faq">
+                            <details>
+                                <summary>❌ "Invalid API key" error</summary>
+                                <p>Make sure you're using the RAG system API key (provided by admin), not your personal OpenAI/Pinecone keys.</p>
+                            </details>
+                            
+                            <details>
+                                <summary>❌ "Rate limit exceeded" error</summary>
+                                <p>You've made too many requests. Wait a bit and try again, or contact admin to increase your limits.</p>
+                            </details>
+                            
+                            <details>
+                                <summary>❌ No relevant results found</summary>
+                                <p>Try rephrasing your question or upload more relevant documents to the system.</p>
+                            </details>
+                        </div>
+                    </div>
+                </details>
             </section>
         </main>
     </div>
