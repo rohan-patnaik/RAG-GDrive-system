@@ -6,10 +6,6 @@
 [build.environment]
   PYTHON_VERSION = "3.9"
 
-[functions]
-  # Python functions configuration
-  external_node_modules = []
-
 [[redirects]]
   from = "/api/health"
   to = "/.netlify/functions/health"
@@ -23,6 +19,11 @@
 [[redirects]]
   from = "/api/ingest"
   to = "/.netlify/functions/ingest"
+  status = 200
+
+[[redirects]]
+  from = "/api/system-key"
+  to = "/.netlify/functions/generate_system_key"
   status = 200
 
 [[redirects]]

@@ -1,34 +1,13 @@
 import json
 import asyncio
-from typing import Dict, Any
 from .utils.config import config
+from .utils.auth import verify_api_key
 from .utils.embeddings import EmbeddingService
 from .utils.vector_store import VectorStore
-from .utils.llm_clients import LLMService
-from .utils.auth import verify_api_key
-from .utils.rate_limiter import RateLimiter
-from .utils.cache import QueryCache, SemanticCache
+from .utils.llm_service import LLMService
 
-async def process_query(query_text: str, llm_provider: str = None, use_cache: bool = True) -> Dict[str, Any]:
-    """Enhanced query processing with caching"""
-    
-    provider = llm_provider or config.DEFAULT_LLM_PROVIDER
-    
-    # Check cache first
-    if use_cache and config.ENABLE_CACHING:
-        if config.ENABLE_SEMANTIC_CACHE:
-            cache = SemanticCache(
-                default_ttl=config.CACHE_TTL,
-                similarity_threshold=config.SEMANTIC_CACHE_THRESHOLD
-            )
-            cached_response = cache.get_semantic(query_text, provider)
-        else:
-            cache = QueryCache(default_ttl=config.CACHE_TTL)
-            cached_response = cache.get(query_text, provider)
-        
-        if cached_response:
-            cached_response['from_cache'] = True
-            return cached_response
+async def process_query(query_text: str, llm_provider: str = None) -> dict:
+    """Process RAG query"""
     
     # Initialize services
     embedding_service = EmbeddingService()
@@ -39,46 +18,35 @@ async def process_query(query_text: str, llm_provider: str = None, use_cache: bo
     query_embedding = embedding_service.encode_text(query_text)
     
     # Search for relevant chunks
-    chunks = vector_store.search(query_embedding, top_k=config.TOP_K_RESULTS)
+    chunks = vector_store.search(query_embedding)
     
-    # Filter by similarity threshold
-    filtered_chunks = [
-        chunk for chunk in chunks 
-        if chunk['score'] >= config.SIMILARITY_THRESHOLD
-    ]
+    # Generate response
+    provider = llm_provider or config.DEFAULT_LLM_PROVIDER
+    context = '\n\n'.join([chunk['content'] for chunk in chunks])
     
-    # Generate response using LLM
-    context = '\n\n'.join([chunk['content'] for chunk in filtered_chunks])
+    if not context.strip():
+        return {
+            'query_text': query_text,
+            'llm_answer': "I couldn't find relevant information in the knowledge base to answer your question.",
+            'llm_provider_used': provider,
+            'llm_model_used': 'N/A',
+            'retrieved_chunks': []
+        }
     
-    llm_response = await llm_service.generate_response(
-        query=query_text,
-        context=context,
-        provider=provider
-    )
+    llm_response = await llm_service.generate_response(query_text, context, provider)
     
-    result = {
+    return {
         'query_text': query_text,
         'llm_answer': llm_response['answer'],
-        'llm_provider_used': provider,
+        'llm_provider_used': llm_response['provider'],
         'llm_model_used': llm_response['model'],
-        'retrieved_chunks': filtered_chunks,
-        'from_cache': False
+        'retrieved_chunks': chunks
     }
-    
-    # Cache the response
-    if use_cache and config.ENABLE_CACHING:
-        if config.ENABLE_SEMANTIC_CACHE:
-            cache.set_semantic(query_text, result, provider)
-        else:
-            cache.set(query_text, result, provider)
-    
-    return result
 
 def handler(event, context):
-    """Enhanced Netlify function handler with auth, rate limiting, and caching"""
+    """Query endpoint handler"""
     
-    # Handle CORS preflight
-    if event['httpMethod'] == 'OPTIONS':
+    if event.get('httpMethod') == 'OPTIONS':
         return {
             'statusCode': 200,
             'headers': {
@@ -102,30 +70,10 @@ def handler(event, context):
                 'body': json.dumps({'error': auth_result['message']})
             }
         
-        # Check rate limit
-        if config.ENABLE_RATE_LIMITING:
-            client_id = auth_result.get('client_id', 'anonymous')
-            rate_limiter = RateLimiter()
-            
-            if not rate_limiter.check_limit(client_id, 'query'):
-                limit_info = rate_limiter.get_limit_info(client_id, 'query')
-                return {
-                    'statusCode': 429,
-                    'headers': {
-                        'Content-Type': 'application/json',
-                        'Access-Control-Allow-Origin': '*',
-                        'X-RateLimit-Limit': str(limit_info['limit']),
-                        'X-RateLimit-Remaining': str(limit_info['remaining']),
-                        'X-RateLimit-Reset': str(limit_info['reset_time'])
-                    },
-                    'body': json.dumps({'error': 'Rate limit exceeded'})
-                }
-        
-        # Parse request body
-        body = json.loads(event['body'])
-        query_text = body.get('query_text', '')
+        # Parse request
+        body = json.loads(event.get('body', '{}'))
+        query_text = body.get('query_text', '').strip()
         llm_provider = body.get('llm_provider')
-        use_cache = body.get('use_cache', True)
         
         if not query_text:
             return {
@@ -138,7 +86,7 @@ def handler(event, context):
             }
         
         # Process query
-        result = asyncio.run(process_query(query_text, llm_provider, use_cache))
+        result = asyncio.run(process_query(query_text, llm_provider))
         
         return {
             'statusCode': 200,

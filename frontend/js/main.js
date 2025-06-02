@@ -1,235 +1,281 @@
-document.addEventListener("DOMContentLoaded", () => {
-    // Ensure authManager and apiClient are available
-    if (!window.authManager || !window.apiClient) {
-        console.error(
-            "AuthManager or APIClient not initialized. Ensure auth.js and api.js are loaded correctly.",
-        );
-        return;
+// Main application logic
+class RAGApp {
+    constructor() {
+        this.initialize();
     }
-
-    // Query form handler
-    const queryForm = document.getElementById("query-form");
-    if (queryForm) {
-        queryForm.addEventListener("submit", async (e) => {
-            e.preventDefault();
-            const queryText = document.getElementById("query-text").value;
-            const llmProvider = document.getElementById("llm-provider").value;
-            const useCache = document.getElementById("use-cache").checked;
-
-            if (!queryText.trim()) {
-                showResults("query-results", "Please enter a question", "error");
-                return;
-            }
-
-            const submitButton = e.target.querySelector('button[type="submit"]');
-            const originalText = submitButton.textContent;
-            submitButton.disabled = true;
-            submitButton.innerHTML =
-                '<span class="loading"></span> Processing...';
-
-            try {
-                const result = await window.apiClient.queryBackend({
-                    query_text: queryText,
-                    llm_provider: llmProvider,
-                    use_cache: useCache,
-                });
-                displayQueryResults(result);
-            } catch (error) {
-                // Error message is likely already shown by APIClient or AuthManager
-                console.error("Query submission error:", error.message);
-                if (!document.querySelector(".message.error")) { // Show only if not already shown
-                    showResults("query-results", `Error: ${error.message}`, "error");
-                }
-            } finally {
-                submitButton.disabled = false;
-                submitButton.textContent = originalText;
-            }
-        });
+    
+    initialize() {
+        this.setupEventListeners();
+        this.checkInitialStatus();
+        this.loadUserPreferences();
     }
-
-    // Upload form handler
-    const uploadForm = document.getElementById("upload-form");
-    if (uploadForm) {
-        uploadForm.addEventListener("submit", async (e) => {
-            e.preventDefault();
-            const filesInput = document.getElementById("files");
-            const source = document.getElementById("source").value;
-
-            if (!filesInput.files.length) {
-                showResults(
-                    "upload-results",
-                    "Please select files to upload",
-                    "error",
-                );
-                return;
-            }
-
-            const formData = new FormData();
-            for (let file of filesInput.files) {
-                formData.append("files", file); // 'files' should match backend expected key
-            }
-            if (source) {
-                formData.append("source", source);
-            }
-
-            const submitButton = e.target.querySelector('button[type="submit"]');
-            const originalText = submitButton.textContent;
-            submitButton.disabled = true;
-            submitButton.innerHTML =
-                '<span class="loading"></span> Uploading...';
-
-            try {
-                const result = await window.apiClient.ingestDocuments(formData);
-                displayUploadResults(result);
-                filesInput.value = ""; // Clear file input
-                document.getElementById("source").value = ""; // Clear source input
-            } catch (error) {
-                console.error("Upload submission error:", error.message);
-                 if (!document.querySelector(".message.error")) {
-                    showResults("upload-results", `Error: ${error.message}`, "error");
-                }
-            } finally {
-                submitButton.disabled = false;
-                submitButton.textContent = originalText;
-            }
-        });
-    }
-
-    // Initial system status check
-    checkSystemStatus();
-}); // End of DOMContentLoaded
-
-function displayQueryResults(result) {
-    const container = document.getElementById("query-results");
-    if (!container) return;
-
-    let html = `
-        <h3>Answer ${result.from_cache ? "(from cache)" : ""}</h3>
-        <div class="answer">${
-            result.llm_answer ? escapeHtml(result.llm_answer) : "No answer provided."
-        }</div>
-        <h4>Details</h4>
-        <p><strong>Provider:</strong> ${escapeHtml(result.llm_provider_used)}</p>
-        <p><strong>Model:</strong> ${escapeHtml(result.llm_model_used)}</p>
-        <p><strong>Retrieved Chunks:</strong> ${
-            result.retrieved_chunks ? result.retrieved_chunks.length : 0
-        }</p>
-    `;
-
-    if (result.retrieved_chunks && result.retrieved_chunks.length > 0) {
-        html += "<h4>Source Context</h4>";
-        result.retrieved_chunks.forEach((chunk) => {
-            html += `
-                <div class="chunk">
-                    <div class="chunk-metadata">
-                        Source: ${escapeHtml(chunk.metadata?.filename || "Unknown")}
-                        (Similarity: ${chunk.score?.toFixed(3) || "N/A"})
-                    </div>
-                    <div>${escapeHtml(chunk.content?.substring(0, 200) || "")}...</div>
-                </div>
-            `;
-        });
-    }
-    container.innerHTML = html;
-    container.className = "results success";
-}
-
-function displayUploadResults(result) {
-    const container = document.getElementById("upload-results");
-    if (!container) return;
-
-    let html = `<h3>${escapeHtml(result.message)}</h3>`;
-    if (result.results && Array.isArray(result.results)) {
-        result.results.forEach((fileResult) => {
-            const statusClass =
-                fileResult.status === "success" ? "success" : "error";
-            html += `
-                <div class="file-result ${statusClass}">
-                    <strong>${escapeHtml(fileResult.filename)}:</strong>
-                    ${
-                        fileResult.status === "success"
-                            ? `Successfully processed ${fileResult.total_chunks} chunks`
-                            : `Error: ${escapeHtml(fileResult.error)}`
-                    }
-                </div>
-            `;
-        });
-    }
-    container.innerHTML = html;
-    container.className = "results success"; // Or dynamically set based on overall success
-}
-
-async function checkSystemStatus() {
-    // Ensure apiClient is available
-    if (!window.apiClient) {
-        console.warn("APIClient not ready for system status check.");
-        showResults(
-            "status-results",
-            "System components not ready.",
-            "info",
-        );
-        return;
-    }
-    try {
-        const status = await window.apiClient.getSystemStatus();
-        displaySystemStatus(status);
-    } catch (error) {
-        console.error("System status check error:", error.message);
-        if (!document.querySelector(".message.error")) {
-            showResults("status-results", `Error: ${error.message}`, "error");
+    
+    setupEventListeners() {
+        // Query form
+        const queryForm = document.getElementById('query-form');
+        if (queryForm) {
+            queryForm.addEventListener('submit', (e) => this.handleQuery(e));
         }
+        
+        // Upload form
+        const uploadForm = document.getElementById('upload-form');
+        if (uploadForm) {
+            uploadForm.addEventListener('submit', (e) => this.handleUpload(e));
+        }
+        
+        // Status refresh
+        const refreshStatusBtn = document.getElementById('refresh-status-btn');
+        if (refreshStatusBtn) {
+            refreshStatusBtn.addEventListener('click', () => this.checkSystemStatus());
+        }
+        
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => this.handleKeyboardShortcuts(e));
     }
-}
-
-function displaySystemStatus(status) {
-    const container = document.getElementById("status-results");
-    if (!container) return;
-
-    let html = `
-        <h3>System Status: ${escapeHtml(status.status)}</h3>
-        <p><strong>Message:</strong> ${escapeHtml(status.message)}</p>
-        <p><strong>Timestamp:</strong> ${new Date(
-            status.timestamp,
-        ).toLocaleString()}</p>
-    `;
-
-    if (status.components && Array.isArray(status.components)) {
-        html += "<h4>Components</h4>";
-        status.components.forEach((component) => {
-            html += `
-                <div class="component ${component.status?.toLowerCase()}">
-                    ${escapeHtml(component.name)}: ${escapeHtml(component.status)}
-                </div>
-            `;
-        });
-    }
-    container.innerHTML = html;
-    container.className = `results ${
-        status.status === "OK" ? "success" : "error"
-    }`;
-}
-
-function showResults(containerId, message, type) {
-    const container = document.getElementById(containerId);
-    if (container) {
-        container.innerHTML = escapeHtml(message);
-        container.className = `results ${type}`;
-    }
-}
-
-function escapeHtml(unsafe) {
-    if (typeof unsafe !== "string") {
-        if (unsafe === null || unsafe === undefined) return "";
+    
+    async handleQuery(e) {
+        e.preventDefault();
+        
+        const queryText = document.getElementById('query-text').value.trim();
+        const llmProvider = document.getElementById('llm-provider').value;
+        
+        if (!queryText) {
+            showToast('Please enter a question', 'error');
+            return;
+        }
+        
+        if (!authManager.isAuthenticated()) {
+            showToast('Please configure your API key first', 'error');
+            return;
+        }
+        
+        setLoadingState('query-submit-btn', true);
+        hideResults('query-results');
+        
         try {
-            unsafe = String(unsafe);
-        } catch (e) {
-            return "";
+            const result = await apiClient.query({
+                query_text: queryText,
+                llm_provider: llmProvider
+            });
+            
+            displayQueryResults(result);
+            
+            // Save to preferences
+            this.saveQueryToHistory(queryText, result);
+            
+            showToast('Query completed successfully', 'success');
+            
+        } catch (error) {
+            console.error('Query failed:', error);
+            showResults('query-results', `❌ Query failed: ${error.message}`, 'error');
+            showToast(`Query failed: ${error.message}`, 'error');
+        } finally {
+            setLoadingState('query-submit-btn', false);
         }
     }
-    return unsafe
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
+    
+    async handleUpload(e) {
+        e.preventDefault();
+        
+        const fileInput = document.getElementById('file-input');
+        const sourceInput = document.getElementById('source-input');
+        
+        if (!fileInput.files.length) {
+            showToast('Please select files to upload', 'error');
+            return;
+        }
+        
+        if (!authManager.isAuthenticated()) {
+            showToast('Please configure your API key first', 'error');
+            return;
+        }
+        
+        // Validate files
+        const validationErrors = [];
+        Array.from(fileInput.files).forEach(file => {
+            const errors = validateFile(file);
+            if (errors.length > 0) {
+                validationErrors.push(`${file.name}: ${errors.join(', ')}`);
+            }
+        });
+        
+        if (validationErrors.length > 0) {
+            showToast(`File validation failed: ${validationErrors.join('; ')}`, 'error');
+            return;
+        }
+        
+        setLoadingState('upload-submit-btn', true);
+        hideResults('upload-results');
+        
+        try {
+            const formData = new FormData();
+            
+            // Add files
+            Array.from(fileInput.files).forEach(file => {
+                formData.append('files', file);
+            });
+            
+            // Add source if provided
+            const source = sourceInput.value.trim();
+            if (source) {
+                formData.append('source', source);
+            }
+            
+            const result = await apiClient.uploadDocuments(formData);
+            
+            displayUploadResults(result);
+            
+            // Clear form on success
+            fileInput.value = '';
+            sourceInput.value = '';
+            document.querySelector('.file-input-display .file-text').textContent = 'Choose files or drag & drop';
+            
+            showToast('Documents uploaded successfully', 'success');
+            
+        } catch (error) {
+            console.error('Upload failed:', error);
+            showResults('upload-results', `❌ Upload failed: ${error.message}`, 'error');
+            showToast(`Upload failed: ${error.message}`, 'error');
+        } finally {
+            setLoadingState('upload-submit-btn', false);
+        }
+    }
+    
+    async checkSystemStatus() {
+        if (!authManager.isAuthenticated()) {
+            showResults('status-results', '❌ Please configure your API key first', 'error');
+            return;
+        }
+        
+        const refreshBtn = document.getElementById('refresh-status-btn');
+        const originalText = refreshBtn.textContent;
+        
+        try {
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = '🔄 Checking...';
+            
+            const status = await apiClient.getHealth();
+            displaySystemStatus(status);
+            
+        } catch (error) {
+            console.error('Status check failed:', error);
+            showResults('status-results', `❌ Status check failed: ${error.message}`, 'error');
+            showToast(`Status check failed: ${error.message}`, 'error');
+        } finally {
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = originalText;
+        }
+    }
+    
+    async checkInitialStatus() {
+        // Check connection status on load
+        if (authManager.isAuthenticated()) {
+            await authManager.checkConnection();
+            await this.checkSystemStatus();
+        }
+    }
+    
+    handleKeyboardShortcuts(e) {
+        // Ctrl/Cmd + Enter to submit query
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            const queryForm = document.getElementById('query-form');
+            if (document.activeElement?.closest('#query-form')) {
+                e.preventDefault();
+                queryForm.dispatchEvent(new Event('submit'));
+            }
+        }
+        
+        // Escape to clear results
+        if (e.key === 'Escape') {
+            hideResults('query-results');
+            hideResults('upload-results');
+            hideResults('status-results');
+        }
+    }
+    
+    saveQueryToHistory(query, result) {
+        try {
+            const history = this.getQueryHistory();
+            history.unshift({
+                query,
+                result: {
+                    answer: result.llm_answer,
+                    provider: result.llm_provider_used,
+                    timestamp: new Date().toISOString()
+                }
+            });
+            
+            // Keep only last 50 queries
+            if (history.length > 50) {
+                history.splice(50);
+            }
+            
+            localStorage.setItem('rag_query_history', JSON.stringify(history));
+        } catch (error) {
+            console.warn('Failed to save query history:', error);
+        }
+    }
+    
+    getQueryHistory() {
+        try {
+            const history = localStorage.getItem('rag_query_history');
+            return history ? JSON.parse(history) : [];
+        } catch (error) {
+            console.warn('Failed to load query history:', error);
+            return [];
+        }
+    }
+    
+    loadUserPreferences() {
+        try {
+            const preferences = localStorage.getItem(CONFIG.STORAGE_KEYS.USER_PREFERENCES);
+            if (preferences) {
+                const prefs = JSON.parse(preferences);
+                
+                // Restore LLM provider preference
+                const llmSelect = document.getElementById('llm-provider');
+                if (llmSelect && prefs.defaultLlmProvider) {
+                    llmSelect.value = prefs.defaultLlmProvider;
+                }
+            }
+        } catch (error) {
+            console.warn('Failed to load user preferences:', error);
+        }
+    }
+    
+    saveUserPreferences() {
+        try {
+            const llmSelect = document.getElementById('llm-provider');
+            const preferences = {
+                defaultLlmProvider: llmSelect?.value || CONFIG.DEFAULT_LLM_PROVIDER,
+                lastSaved: new Date().toISOString()
+            };
+            
+            localStorage.setItem(CONFIG.STORAGE_KEYS.USER_PREFERENCES, JSON.stringify(preferences));
+        } catch (error) {
+            console.warn('Failed to save user preferences:', error);
+        }
+    }
 }
+
+// Initialize the application
+document.addEventListener('DOMContentLoaded', () => {
+    window.ragApp = new RAGApp();
+    
+    // Save preferences on form changes
+    const llmSelect = document.getElementById('llm-provider');
+    if (llmSelect) {
+        llmSelect.addEventListener('change', () => {
+            window.ragApp.saveUserPreferences();
+        });
+    }
+});
+
+// Handle page visibility changes (auto-refresh status when page becomes visible)
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && window.ragApp && authManager.isAuthenticated()) {
+        setTimeout(() => {
+            authManager.checkConnection();
+        }, 1000);
+    }
+});

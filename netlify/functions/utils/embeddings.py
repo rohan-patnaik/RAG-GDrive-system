@@ -1,16 +1,18 @@
 import openai
-import numpy as np
 from typing import List
 from .config import config
 
 class EmbeddingService:
-    """Lightweight embedding service using OpenAI's API"""
+    """Embedding service using OpenAI"""
     
     def __init__(self):
+        if not config.OPENAI_API_KEY:
+            raise ValueError("OpenAI API key required for embeddings")
+        
         self.client = openai.OpenAI(api_key=config.OPENAI_API_KEY)
     
     def encode_text(self, text: str) -> List[float]:
-        """Generate embedding for a single text"""
+        """Generate embedding for text"""
         response = self.client.embeddings.create(
             model="text-embedding-ada-002",
             input=text

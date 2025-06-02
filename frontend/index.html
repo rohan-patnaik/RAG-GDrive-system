@@ -3,90 +3,163 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RAG Document Query System</title>
+    <title>RAG GDrive System</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>RAG Document Query System</h1>
-            <div id="rate-limit-info" class="rate-limit-info"></div>
+            <h1>🤖 RAG GDrive System</h1>
+            <div class="header-info">
+                <div id="connection-status" class="status-indicator">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Checking...</span>
+                </div>
+                <div id="api-key-status" class="api-key-status">
+                    <span class="key-icon">🔑</span>
+                    <span class="key-status">Not configured</span>
+                </div>
+            </div>
         </header>
 
         <main>
-            <section class="auth-section">
-                <h2>System Access Configuration</h2>
-                <p class="info-text">
-                    To use this application, you need to provide the "Backend Access Key".
-                    This is a key that you define and also set in your Netlify environment variables
-                    (e.g., as `API_KEY` or `BACKEND_API_KEY`) to secure your backend functions.
-                </p>
-                <div class="form-group">
-                    <label for="backend-access-key">Backend Access Key:</label>
-                    <input type="password" id="backend-access-key" placeholder="Enter your defined Backend Access Key">
-                    <button onclick="authManager.saveAccessKey()">Save Access Key</button>
+            <!-- API Key Configuration Section -->
+            <section class="config-section">
+                <h2>🔐 API Configuration</h2>
+                <div class="config-card">
+                    <div class="form-group">
+                        <label for="system-api-key">System API Key:</label>
+                        <div class="key-input-group">
+                            <input type="password" id="system-api-key" 
+                                   placeholder="Enter your system API key or generate one">
+                            <button type="button" id="generate-key-btn" class="secondary-btn">
+                                Generate Key
+                            </button>
+                            <button type="button" id="save-key-btn" class="primary-btn">
+                                Save
+                            </button>
+                        </div>
+                        <small class="help-text">
+                            💡 If you don't have a key, click "Generate Key" to create one
+                        </small>
+                    </div>
                 </div>
-                <div id="auth-message" class="message" style="display:none;"></div>
             </section>
 
+            <!-- Query Section -->
             <section class="query-section">
-                <h2>Query Documents</h2>
-                <form id="query-form" class="api-form">
-                    <div class="form-group">
-                        <label for="query-text">Question:</label>
-                        <textarea id="query-text" placeholder="Ask a question about your documents..." rows="3"></textarea>
-                    </div>
+                <h2>💬 Ask Questions</h2>
+                <div class="query-card">
+                    <form id="query-form">
+                        <div class="form-group">
+                            <label for="query-text">Your Question:</label>
+                            <textarea id="query-text" 
+                                      placeholder="Ask anything about your uploaded documents..."
+                                      rows="3"></textarea>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="llm-provider">AI Provider:</label>
+                                <select id="llm-provider">
+                                    <option value="gemini">🧠 Google Gemini (Default)</option>
+                                    <option value="openai">🤖 OpenAI GPT</option>
+                                    <option value="anthropic">🎭 Anthropic Claude</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <button type="submit" class="primary-btn" id="query-submit-btn">
+                                    <span class="btn-text">Ask Question</span>
+                                    <span class="btn-loader" style="display: none;">🤔 Thinking...</span>
+                                </button>
+                            </div>
+                        </div>
+                    </form>
 
-                    <div class="form-group">
-                        <label for="llm-provider">LLM Provider (Backend will use its configured key):</label>
-                        <select id="llm-provider">
-                            <option value="openai">OpenAI GPT</option>
-                            <option value="anthropic">Anthropic Claude</option>
-                            <option value="google">Google Gemini</option>
-                        </select>
-                    </div>
-
-                    <div class="form-group">
-                        <label>
-                            <input type="checkbox" id="use-cache" checked>
-                            Use cache for faster responses
-                        </label>
-                    </div>
-
-                    <button type="submit">Ask Question</button>
-                </form>
-                <div id="query-results" class="results"></div>
+                    <div id="query-results" class="results-container"></div>
+                </div>
             </section>
 
+            <!-- Document Upload Section -->
             <section class="upload-section">
-                <h2>Upload Documents</h2>
-                <form id="upload-form" class="api-form">
-                    <div class="form-group">
-                        <label for="files">Select Files:</label>
-                        <input type="file" id="files" multiple accept=".txt,.pdf,.docx">
-                        <small>Supported formats: TXT, PDF, DOCX. Backend uses its configured Pinecone key.</small>
-                    </div>
+                <h2>📄 Upload Documents</h2>
+                <div class="upload-card">
+                    <form id="upload-form">
+                        <div class="form-group">
+                            <label for="file-input">Select Files:</label>
+                            <div class="file-input-wrapper">
+                                <input type="file" id="file-input" multiple 
+                                       accept=".txt,.pdf,.docx,.md">
+                                <div class="file-input-display">
+                                    <span class="file-icon">📁</span>
+                                    <span class="file-text">Choose files or drag & drop</span>
+                                </div>
+                            </div>
+                            <small class="help-text">
+                                Supported: TXT, PDF, DOCX, MD files
+                            </small>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="source-input">Source (Optional):</label>
+                            <input type="text" id="source-input" 
+                                   placeholder="e.g., Company Handbook, Research Papers">
+                        </div>
+                        
+                        <button type="submit" class="primary-btn" id="upload-submit-btn">
+                            <span class="btn-text">📤 Upload Documents</span>
+                            <span class="btn-loader" style="display: none;">⏳ Processing...</span>
+                        </button>
+                    </form>
 
-                    <div class="form-group">
-                        <label for="source">Source (optional):</label>
-                        <input type="text" id="source" placeholder="e.g., Company Handbook, Research Papers">
-                    </div>
-
-                    <button type="submit">Upload Documents</button>
-                </form>
-                <div id="upload-results" class="results"></div>
+                    <div id="upload-results" class="results-container"></div>
+                </div>
             </section>
 
+            <!-- System Status Section -->
             <section class="status-section">
-                <h2>System Status</h2>
-                <button onclick="checkSystemStatus()">Check Status</button>
-                <div id="status-results" class="results"></div>
+                <h2>📊 System Status</h2>
+                <div class="status-card">
+                    <button id="refresh-status-btn" class="secondary-btn">
+                        🔄 Refresh Status
+                    </button>
+                    <div id="status-results" class="results-container"></div>
+                </div>
             </section>
         </main>
+
+        <!-- Toast Notifications -->
+        <div id="toast-container" class="toast-container"></div>
+
+        <!-- Help Modal -->
+        <div id="help-modal" class="modal">
+            <div class="modal-content">
+                <span class="close">&times;</span>
+                <h3>🆘 Help & Setup Guide</h3>
+                <div class="help-content">
+                    <h4>Getting Started:</h4>
+                    <ol>
+                        <li>Click "Generate Key" to create your API key</li>
+                        <li>Upload some documents using the upload section</li>
+                        <li>Ask questions about your documents</li>
+                    </ol>
+                    
+                    <h4>Troubleshooting:</h4>
+                    <ul>
+                        <li><strong>401 Error:</strong> Check your API key</li>
+                        <li><strong>No results:</strong> Upload relevant documents first</li>
+                        <li><strong>Slow responses:</strong> Try a different AI provider</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
     </div>
 
+    <script src="js/config.js"></script>
     <script src="js/auth.js"></script>
     <script src="js/api.js"></script>
+    <script src="js/ui.js"></script>
     <script src="js/main.js"></script>
 </body>
 </html>

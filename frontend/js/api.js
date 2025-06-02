@@ -1,122 +1,109 @@
-const API_BASE_URL = "/.netlify/functions"; // Or '/api' if using redirects like /api/*
-
 class APIClient {
     constructor() {
-        this.rateLimitInfo = {};
+        this.baseURL = CONFIG.API_BASE_URL;
+        this.timeout = CONFIG.DEFAULT_TIMEOUT;
+        this.retryAttempts = CONFIG.RETRY_ATTEMPTS;
     }
-
+    
     async makeRequest(endpoint, options = {}) {
-        let headers = {
-            // Default Content-Type for JSON, can be overridden
-            "Content-Type": "application/json",
-            ...options.headers, // Spread existing headers from options
+        const url = `${this.baseURL}${endpoint}`;
+        
+        // Prepare headers
+        const headers = {
+            'Content-Type': 'application/json',
+            ...options.headers
         };
-
+        
+        // Add auth headers if available
         try {
-            // Get auth headers and merge them
             const authHeaders = authManager.getAuthHeaders();
-            headers = { ...headers, ...authHeaders };
+            Object.assign(headers, authHeaders);
         } catch (error) {
-            // If getAuthHeaders throws (e.g., key not set), propagate the error
-            console.error("Authentication error:", error.message);
-            authManager.showMessage(error.message, "error"); // Show message in UI
-            throw error; // Re-throw to stop the request
+            if (endpoint !== '/generate_system_key' && endpoint !== '/health') {
+                throw new Error('Authentication required. Please configure your API key.');
+            }
         }
-
-        // If body is FormData, remove Content-Type so browser can set it with boundary
-        if (options.body instanceof FormData) {
-            delete headers["Content-Type"];
-        }
-
-        try {
-            const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-                ...options, // Spread other options like method, body
-                headers, // Use the combined headers
-            });
-
-            this.updateRateLimitInfo(response.headers);
-
-            if (!response.ok) {
-                let errorData;
-                try {
-                    errorData = await response.json();
-                } catch (e) {
-                    // If response is not JSON
-                    errorData = {
-                        error: `HTTP ${response.status} ${response.statusText}`,
-                    };
+        
+        // Prepare request options
+        const requestOptions = {
+            ...options,
+            headers,
+            signal: AbortSignal.timeout(this.timeout)
+        };
+        
+        let lastError;
+        
+        // Retry logic
+        for (let attempt = 0; attempt <= this.retryAttempts; attempt++) {
+            try {
+                const response = await fetch(url, requestOptions);
+                
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    const errorMessage = errorData.error || `HTTP ${response.status}`;
+                    throw new Error(errorMessage);
                 }
-                const errorMessage =
-                    errorData.error ||
-                    `API Request Failed: ${response.status}`;
-                authManager.showMessage(errorMessage, "error");
-                throw new Error(errorMessage);
-            }
-
-            // Handle cases where response might be empty (e.g., 204 No Content)
-            const contentType = response.headers.get("content-type");
-            if (contentType && contentType.includes("application/json")) {
+                
                 return await response.json();
+                
+            } catch (error) {
+                lastError = error;
+                
+                // Don't retry on auth errors or client errors
+                if (error.name === 'AbortError' || 
+                    error.message.includes('401') || 
+                    error.message.includes('400')) {
+                    break;
+                }
+                
+                // Wait before retry (exponential backoff)
+                if (attempt < this.retryAttempts) {
+                    await new Promise(resolve => 
+                        setTimeout(resolve, Math.pow(2, attempt) * 1000)
+                    );
+                }
             }
-            return await response.text(); // Or handle as appropriate
-        } catch (error) {
-            console.error("API request failed:", error.message);
-            // authManager.showMessage(error.message, "error"); // Already shown or will be shown
-            throw error;
         }
+        
+        throw lastError;
     }
-
-    updateRateLimitInfo(headers) {
-        const limit = headers.get("X-RateLimit-Limit");
-        const remaining = headers.get("X-RateLimit-Remaining");
-        const reset = headers.get("X-RateLimit-Reset");
-
-        if (limit && remaining && reset) {
-            this.rateLimitInfo = {
-                limit: parseInt(limit),
-                remaining: parseInt(remaining),
-                reset: parseInt(reset),
-            };
-            this.updateRateLimitUI();
-        }
-    }
-
-    updateRateLimitUI() {
-        const rateLimitElement = document.getElementById("rate-limit-info");
-        if (rateLimitElement && Object.keys(this.rateLimitInfo).length > 0) {
-            const { limit, remaining, reset } = this.rateLimitInfo;
-            const resetDate = new Date(reset * 1000);
-            rateLimitElement.innerHTML = `
-                API Rate: ${remaining}/${limit} left
-                (Resets: ${resetDate.toLocaleTimeString()})
-            `;
-        } else if (rateLimitElement) {
-            rateLimitElement.innerHTML = ""; // Clear if no info
-        }
-    }
-
-    async queryBackend(queryData) {
-        return this.makeRequest("/query", {
-            // Netlify function name is 'query'
-            method: "POST",
-            body: JSON.stringify(queryData),
+    
+    async query(queryData) {
+        return this.makeRequest('/query', {
+            method: 'POST',
+            body: JSON.stringify(queryData)
         });
     }
-
-    async getSystemStatus() {
-        return this.makeRequest("/health"); // Netlify function name is 'health'
-    }
-
-    async ingestDocuments(formData) {
-        return this.makeRequest("/ingest", {
-            // Netlify function name is 'ingest'
-            method: "POST",
-            body: formData, // FormData will be handled by makeRequest
+    
+    async uploadDocuments(formData) {
+        // For file uploads, don't set Content-Type (let browser handle it)
+        const headers = authManager.getAuthHeaders();
+        
+        return fetch(`${this.baseURL}/ingest`, {
+            method: 'POST',
+            headers,
+            body: formData,
+            signal: AbortSignal.timeout(this.timeout * 2) // Longer timeout for uploads
+        }).then(async response => {
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.error || `Upload failed: ${response.status}`);
+            }
+            return response.json();
         });
+    }
+    
+    async getHealth() {
+        return this.makeRequest('/health');
+    }
+    
+    async generateSystemKey() {
+        return this.makeRequest('/generate_system_key');
     }
 }
 
-// Initialize API client when the DOM is ready
-document.addEventListener("DOMContentLoaded", () => {
-    window.apiClient = new APIClient();
-});
+// Initialize API client
+const apiClient = new APIClient();
+
+// Export for global use
+window.apiClient = apiClient;
